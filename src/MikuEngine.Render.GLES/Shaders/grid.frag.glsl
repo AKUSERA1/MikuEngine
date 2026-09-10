@@ -1,11 +1,13 @@
 #version 310 es
-precision mediump float;
+// 用 highp：vWorldPos 是 ±500 的世界坐标，mediump 在 GLES 上可能是 fp16，
+//    远处格网会出现"不连贯/抖动"。桌面 GL 通常把 mediump 当 fp32，所以桌面看不出问题。
+precision highp float;
 
 // MikuEngine GLES 3.1 —— 迷雾格网地面 片元着色器
 // 由 MikuPlay.Rendering.Vulkan 的 grid.frag 改写而来：
 //   #version 450 → #version 310 es
 //   layout(set=0, binding=0) → layout(binding=0)
-//   新增 precision mediump float;（GLES fragment 必须显式声明）
+//   新增按导数的分级淡出，消除远处摩尔纹/锯齿（修复一直存在的格网锯齿问题）
 
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 0) out vec4 outColor;
@@ -42,19 +44,33 @@ void main() {
     float sz = smoothstep(halfLine - gd.y, halfLine + gd.y, frac.y);
     float hitVert  = 1.0 - sx;
     float hitHoriz = 1.0 - sz;
-    float lineHit  = max(hitVert, hitHoriz);
 
     vec2 idx = round(gp);
     float majorEvery = max(u.uGridParams.z, 1.0);
     vec2 modv = abs(mod(idx, majorEvery));
 
-    vec3 lineColor;
-    if (hitHoriz > 0.5 && abs(idx.y) < 0.01)      lineColor = u.uAxisXColor.rgb;
-    else if (hitVert > 0.5 && abs(idx.x) < 0.01)  lineColor = u.uAxisZColor.rgb;
-    else {
-        bool major = (hitVert > 0.5 && modv.x < 0.01) || (hitHoriz > 0.5 && modv.y < 0.01);
-        lineColor = major ? u.uMajorColor.rgb : u.uMinorColor.rgb;
-    }
+    bool isAxisX = hitHoriz > 0.5 && abs(idx.y) < 0.01;
+    bool isAxisZ = hitVert  > 0.5 && abs(idx.x) < 0.01;
+    bool isMajor = !isAxisX && !isAxisZ &&
+                   ((hitVert > 0.5 && modv.x < 0.01) || (hitHoriz > 0.5 && modv.y < 0.01));
+
+    vec3 lineColor = isAxisX ? u.uAxisXColor.rgb
+                   : isAxisZ ? u.uAxisZColor.rgb
+                   : isMajor ? u.uMajorColor.rgb
+                             : u.uMinorColor.rgb;
+
+    // ── 反摩尔纹：一个像素里挤进多条线时，按层级把线淡出 ────────────────
+    // gd = 一个像素覆盖多少个 minor 格。gd > 1 时 minor 线必然采样混叠。
+    // major 线间距是 minor 的 majorEvery 倍，轴只有两条，因此各自的容忍阈值逐级放宽。
+    float gdmax     = max(gd.x, gd.y);
+    float minorFade = 1.0 - smoothstep(0.25, 1.00, gdmax);
+    float majorFade = 1.0 - smoothstep(0.75, 2.50, gdmax);
+    float axisFade  = 1.0 - smoothstep(2.00, 6.00, gdmax);
+    float fade      = (isAxisX || isAxisZ) ? axisFade
+                    : isMajor              ? majorFade
+                                           : minorFade;
+
+    float lineHit = max(hitVert, hitHoriz) * fade;
 
     vec3 fogColor = u.uFogColor.rgb;
     vec3 gridCol = mix(lineColor, fogColor, fog * 0.9);
