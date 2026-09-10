@@ -82,6 +82,9 @@ window.Load += () =>
 
     Console.WriteLine($"[Demo] 顶点 {m.VertexCount} | 三角形 {m.IndexData.Length / 3} | 骨骼 {m.BoneCount} | 材质 {m.Segments.Length}");
     Console.WriteLine($"[Demo] 队列分类：Opaque={opaque} Cutout={cutout} Blended={blended}");
+    int edgeCount = 0;
+    foreach (var seg in m.Segments) if (seg.EnableEdge) edgeCount++;
+    Console.WriteLine($"[Demo] 轮廓线：{edgeCount}/{m.Segments.Length} 个材质（按 E 开关）");
     Console.WriteLine($"[Demo] 蒙皮矩阵 {m.BoneCount * 64 / 1024.0:F1} KB → SSBO" +
                       $"（UBO 最小保证仅 16 KB，这里必须用 SSBO）");
     Console.WriteLine($"[Demo] 纹理库：{model.Textures.Count - 1} 张已加载");
@@ -148,6 +151,11 @@ window.Load += () =>
                 string boneName = bone < target.Model.BoneNames.Length ? target.Model.BoneNames[bone] : "?";
                 Console.WriteLine($"[Demo] 姿势：{boneName} 旋转 {(poseApplied ? "30°" : "0°")}");
             }
+            else if (key == Keys.E)
+            {
+                target.EdgeVisible = !target.EdgeVisible;
+                Console.WriteLine($"[Demo] 轮廓线：{(target.EdgeVisible ? "开" : "关")}");
+            }
             else if (key == Keys.R)
             {
                 poseApplied = false;
@@ -157,7 +165,7 @@ window.Load += () =>
         });
     }
 
-    Console.WriteLine("[Demo] 鼠标: 左键=旋转 | 右键=平移 | 滚轮=缩放 | B=弯曲测试 | R=重置");
+    Console.WriteLine("[Demo] 鼠标: 左键=旋转 | 右键=平移 | 滚轮=缩放 | B=弯曲测试 | E=轮廓线 | R=重置");
 };
 
 window.FramebufferResize += size => device?.Resize(size.X, size.Y);

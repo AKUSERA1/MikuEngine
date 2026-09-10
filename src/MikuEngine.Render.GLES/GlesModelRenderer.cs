@@ -55,11 +55,13 @@ public sealed unsafe class GlesModelRenderer : IDisposable
 {
     private readonly GlesDevice _device;
     private readonly uint _program;
+    private readonly uint _edgeProgram;
     private readonly uint _vao, _vbo, _ebo;
     private readonly uint _frameUbo;
     private readonly GlesSkinMatricesBuffer _skin;
     private readonly GlesTextureLibrary _textures;
     private readonly MikuEngine.Core.Models.SkeletalModel _model;
+    private readonly bool _hasEdge;
     private bool _disposed;
 
     // uniform locations
@@ -68,7 +70,13 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     private readonly int _locEnableTexture, _locEnableSphere, _locEnableToon, _locSphereMode;
     private readonly int _locDiffuseTex, _locSphereTex, _locToonTex;
 
+    // edge program 的 uniform
+    private readonly int _locEdgeSkinMatBase, _locEdgeColor, _locEdgeSize;
+
     public Core.Models.SkeletalModel Model => _model;
+
+    /// <summary>轮廓线开关（对应 PmxEditor 的 chkEdge）。默认开。</summary>
+    public bool EdgeVisible { get; set; } = true;
     public GlesTextureLibrary Textures => _textures;
     public int SkinMatrixBaseOffset { get; private set; }
 
@@ -76,6 +84,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     {
         _device = device;
         _model = model;
+        _hasEdge = HasAnyEdge(model);
         _textures = textures;
         var gl = device.Gl;
 
@@ -111,6 +120,24 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         {
             if (loc < 0)
                 Console.WriteLine($"[GlesModelRenderer] ⚠️ uniform 未找到：{name}");
+        }
+
+        // ── 轮廓线 program（PE: technique tec_edge，独立于主渲染）──────────
+        _edgeProgram = device.BuildProgram(
+            "MikuEngine.Render.GLES.Shaders.edge.vert.glsl",
+            "MikuEngine.Render.GLES.Shaders.edge.frag.glsl");
+        _locEdgeSkinMatBase = gl.GetUniformLocation(_edgeProgram, "uSkinMatBase");
+        _locEdgeColor = gl.GetUniformLocation(_edgeProgram, "uMaterialEdgeColor");
+        _locEdgeSize = gl.GetUniformLocation(_edgeProgram, "uMaterialEdgeSize");
+        foreach (var (name, loc) in new (string, int)[]
+        {
+            ("uSkinMatBase", _locEdgeSkinMatBase),
+            ("uMaterialEdgeColor", _locEdgeColor),
+            ("uMaterialEdgeSize", _locEdgeSize),
+        })
+        {
+            if (loc < 0)
+                Console.WriteLine($"[GlesModelRenderer] ⚠️ edge uniform 未找到：{name}");
         }
 
         // ── 顶点缓冲 ────────────────────────────────────────────────────
@@ -152,6 +179,13 @@ public sealed unsafe class GlesModelRenderer : IDisposable
 
         _frameUbo = device.CreateUbo((nuint)sizeof(FrameUniforms));
         _skin = new GlesSkinMatricesBuffer(device, model.BoneCount);
+    }
+
+    private static bool HasAnyEdge(Core.Models.SkeletalModel model)
+    {
+        foreach (var s in model.Segments)
+            if (s.EnableEdge) return true;
+        return false;
     }
 
     /// <summary>从磁盘加载 PMX 并建立渲染资源（纹理按 PMX 内的相对路径在模型目录解析）。</summary>
@@ -245,6 +279,10 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         // 拆队列毫无收益，还会改变绘制顺序、破坏连续 alpha 渐变。
         DrawSegments(_model.Segments);
 
+        // 轮廓线（PE 是独立 technique tec_edge，在主渲染之后跑）
+        if (_hasEdge && EdgeVisible)
+            DrawEdges();
+
         gl.BindVertexArray(0);
 
         // 还原全局状态，避免污染下一帧的 grid / 其它渲染器
@@ -282,6 +320,49 @@ public sealed unsafe class GlesModelRenderer : IDisposable
 
             // 逐材质设置剔除状态（PE 对每个材质都可能切一次）
             ApplyRenderState(gl, seg.IsDoubleSided);
+
+            gl.DrawElements(PrimitiveType.Triangles, (uint)seg.IndexCount, DrawElementsType.UnsignedInt,
+                (void*)(seg.IndexStart * sizeof(uint)));
+        }
+    }
+
+    /// <summary>
+    /// 轮廓线 pass（PE: technique tec_edge）。
+    ///
+    /// 要点：
+    ///  · 主渲染全部画完之后再画 —— edge 外扩壳与本体共享深度，后画才能被正确遮挡
+    ///  · 只画 (flag & EnabledToonEdge) != 0 且 EdgeSize &gt; 0 的材质（本模型 42 个里 23 个）
+    ///  · 复用同一个 VAO：edge VS 用的 attribute 槽位与主 VS 完全一致
+    ///  · 剔除状态与主渲染同规则（逐材质按双面 flag）；blend 恒开，
+    ///    因此 EdgeColor.w &lt; 1 的边缘是半透明的（本模型脸/肌/足 = 0.60）
+    /// </summary>
+    private void DrawEdges()
+    {
+        var gl = _device.Gl;
+        gl.UseProgram(_edgeProgram);
+        gl.Uniform1(_locEdgeSkinMatBase, (float)SkinMatrixBaseOffset);
+
+        int unit = 0; _ = unit;   // edge 不采样纹理
+
+        foreach (var seg in _model.Segments)
+        {
+            if (!seg.EnableEdge || seg.IndexCount <= 0) continue;
+
+            var m = _model.Materials[seg.MaterialIndex];
+            gl.Uniform4(_locEdgeColor, m.EdgeColor.X, m.EdgeColor.Y, m.EdgeColor.Z, m.EdgeColor.W);
+            gl.Uniform1(_locEdgeSize, m.EdgeSize);
+
+            ApplyRenderState(gl, seg.IsDoubleSided);
+
+            // ⚠️ inverted hull 必须剔除正面，否则外扩壳的正面比本体更靠近相机、
+            //    深度测试必然通过，会把整个本体盖成轮廓色（已实测踩坑）。
+            //    剔掉正面后只剩壳体的背面，恰好只在轮廓边缘露出一条边。
+            //
+            //    注意：这里**不**沿用材质的双面 flag —— 両面说的是「本体两面都画」，
+            //    不是「壳体两面都画」。双面材质若不剔除正面同样会盖住本体。
+            gl.Enable(EnableCap.CullFace);
+            gl.CullFace(TriangleFace.Front);
+            gl.FrontFace(FrontFaceDirection.CW);
 
             gl.DrawElements(PrimitiveType.Triangles, (uint)seg.IndexCount, DrawElementsType.UnsignedInt,
                 (void*)(seg.IndexStart * sizeof(uint)));
@@ -334,6 +415,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         gl.DeleteBuffer(_ebo);
         gl.DeleteBuffer(_frameUbo);
         gl.DeleteProgram(_program);
+        gl.DeleteProgram(_edgeProgram);
         _skin.Dispose();
         _textures.Dispose();
     }

@@ -219,3 +219,49 @@ public class SkeletalModelConverterTests
 
     private static bool AlmostEqual(float a, float b, float tol) => MathF.Abs(a - b) <= tol;
 }
+
+// ------------------------------------------------------------------ 轮廓线
+
+public class EdgeSegmentTests
+{
+    private static SkeletalModel Load()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null)
+        {
+            var c = Path.Combine(dir.FullName, "samples/MikuEngine.Demo/Model/Model.pmx".Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(c)) return SkeletalModelConverter.Convert(PmxParser.Parse(File.ReadAllBytes(c)));
+            dir = dir.Parent;
+        }
+        throw new IOException("未找到 Model.pmx");
+    }
+
+    [Fact]
+    public void EdgeSegments_RequireFlagAndPositiveSize()
+    {
+        var m = Load();
+        int withEdge = 0;
+        foreach (var seg in m.Segments)
+        {
+            var mat = m.Materials[seg.MaterialIndex];
+            bool expect = (mat.Flag & PmxMaterialFlag.EnabledToonEdge) != 0 && mat.EdgeSize > 0f;
+            Assert.Equal(expect, seg.EnableEdge);
+            if (seg.EnableEdge) withEdge++;
+        }
+        // Elysia 实测：42 个材质里 23 个带轮廓线
+        Assert.Equal(23, withEdge);
+    }
+
+    [Fact]
+    public void EdgeColors_ArePerMaterial_NotAllBlack()
+    {
+        var m = Load();
+        // 脸(3) 是暗红棕 (0.37,0.05,0.05,0.60)，兔子(37) 是黄色 (1,1,0.5,0.8)
+        var face = m.Materials[3];
+        Assert.True(face.EdgeColor.X > 0.3f && face.EdgeColor.Y < 0.1f, "脸的轮廓色应为暗红棕");
+        Assert.True(face.EdgeColor.W < 0.7f, "脸的轮廓 alpha 应为 0.60（半透明）");
+        var rabbit = m.Materials[37];
+        Assert.True(rabbit.EdgeColor.X > 0.9f && rabbit.EdgeColor.Y > 0.9f, "兔子的轮廓色应为亮黄");
+        Assert.Equal(1.2f, rabbit.EdgeSize, 2);
+    }
+}

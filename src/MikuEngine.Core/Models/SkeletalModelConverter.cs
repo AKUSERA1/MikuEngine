@@ -284,7 +284,9 @@ public static class SkeletalModelConverter
                 EnableSphere = m.SphereTextureIndex >= 0 && m.SphereTextureIndex < pmx.Textures.Length,
                 EnableToon = m.ToonTextureIndex >= 0,
                 IsDoubleSided = (m.Flag & PmxMaterialFlag.IsDoubleSided) != 0,
-                EnableEdge = (m.Flag & PmxMaterialFlag.EnabledToonEdge) != 0 || m.EdgeSize > 0f,
+                // MMD 语义：需要「ToonEdge flag 置位」且「EdgeSize > 0」才画轮廓线。
+                // 本模型 42 个材质里 23 个满足；不能用 ||，否则头发系（flag 未置位）会误画。
+                EnableEdge = (m.Flag & PmxMaterialFlag.EnabledToonEdge) != 0 && m.EdgeSize > 0f,
                 Center = ComputeSegmentCenter(pmx, cursor, indexCount),
             };
 
