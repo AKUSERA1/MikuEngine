@@ -24,7 +24,6 @@ uniform float uEnableTexture;
 uniform float uEnableSphere;
 uniform float uEnableToon;
 uniform float uSphereMode;   // 1 = Multiply, 2 = Add, 3 = SubTexture
-uniform float uMaterialType; // 0 = Opaque, 1 = Cutout, 2 = Blended
 
 layout(location = 0) in vec3  vNormal;
 layout(location = 1) in vec4  vColor;
@@ -34,12 +33,9 @@ layout(location = 4) in float vToonV;
 
 out vec4 fragColor;
 
-const float CutoutThreshold = 0.5;
-
 void main()
 {
     int sphereMode = int(uSphereMode + 0.5);
-    int matType    = int(uMaterialType + 0.5);
 
     vec4 col = clamp(vColor, 0.0, 1.0);
 
@@ -56,16 +52,21 @@ void main()
             col *= texture(uSphereTex, vUv);   // SubTex：PE 用 UVA1，v1 退化成主 UV
     }
 
-    // PE L531-534：完全透過時破棄
+    // ── Alpha（对齐 PmxEditor，2026-09-10 修订）─────────────────────────
+    // PE 的 fxd 只有一个 model technique、单一 pass：
+    //   AlphaBlendEnable = True; SrcBlend = SRCALPHA; DestBlend = INVSRCALPHA
+    // 且**完全没有** AlphaTestEnable / AlphaFunc / AlphaRef / ZWriteEnable。
+    // PS 里唯一的丢弃就是下面这句 —— 阈值是 0，不是 0.5。
+    //
+    // 之前的 `col.a < 0.5 discard`（Cutout 队列）是自创行为，PE/MMD 没有：
+    // 它会把 0.3~0.5 的连续 alpha 像素整个砍掉、把柔和边缘切成硬边，
+    // 破坏 MMD 的连续渐变透明（如本模型的「袖透」Diffuse.a=0.8）。
     if (col.a <= 0.0) discard;
-
-    // Cutout 队列的 alpha test（docs §3.3）
-    if (matType == 1 && col.a < CutoutThreshold) discard;
 
     // Toon 查表（PE L554）—— U 用主 UV 的 x（toon 图在 U 方向恒定），V 用 ToonCf
     if (uEnableToon > 0.5)
         col *= texture(uToonTex, vec2(vUv.x, vToonV));
 
-    // Straight alpha：Blended 队列直接用 col.a 做 src-alpha
+    // Straight alpha，blend 由固定管线 SRC_ALPHA/INV_SRC_ALPHA 完成
     fragColor = col;
 }

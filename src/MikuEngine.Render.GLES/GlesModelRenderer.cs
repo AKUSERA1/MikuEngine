@@ -31,13 +31,16 @@ public struct FrameUniforms
         ViewProj = Matrix4x4.Identity,
         View = Matrix4x4.Identity,
         CameraPosition = new Vector4(0f, 0f, 1f, 0f),
-        // MMD 默认光：从左上前方打下来
-        LightDirection = new Vector4(Vector3.Normalize(new Vector3(-0.5f, -1f, -0.5f)), 0f),
-        LightColor = new Vector4(1f, 1f, 1f, 1f),
-        // PE 公式：diff = Diffuse * (0.5*ly*LightColor + MaterialAmbient)，再乘 AmbientColor*2。
-        // PMX 常见 MaterialAmbient≈0.5，ly=1 时 diff≈Diffuse*1.0；要让它正好到 1.0，这里应取 0.5。
-        // 取 0.75 会过曝成"白模"，取 0.3 会偏暗。
-        AmbientColor = new Vector4(0.5f, 0.5f, 0.5f, 1f),
+        // ⚠️ 以下三个是 PmxEditor 的默认值（反编译 PmxEditorCore L12531-12535，InitializeDevice）：
+        //   m_manager.Ambient = System.Drawing.Color.White;
+        //   m_manager.SetLightDirection(new Vector3(-0.5f, -1f, 0.5f));   ← Z 是 +0.5
+        //   m_manager.SetLightColor(new Color4(0.5f, 0.5f, 0.5f));        ← 0.5 灰，不是 1
+        // 之前自定的 (1,1,1) / (-0.5,-1,-0.5) / AmbientColor=0.5 会让整体偏暗、
+        // 且被照亮的朝向与 PE 不同（Z 分量符号相反）。
+        // 代入 PE 公式：diff = Diffuse * (0.25*ly + 0.753) * 2.0，背光面也 ×1.5 —— PE 默认观感就是偏白。
+        LightDirection = new Vector4(Vector3.Normalize(new Vector3(-0.5f, -1f, 0.5f)), 0f),
+        LightColor = new Vector4(0.5f, 0.5f, 0.5f, 1f),
+        AmbientColor = new Vector4(1f, 1f, 1f, 1f),
         BaseAmbient = new Vector4(0.07f, 0.07f, 0.07f, 1f),
     };
 }
@@ -57,13 +60,12 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     private readonly GlesSkinMatricesBuffer _skin;
     private readonly GlesTextureLibrary _textures;
     private readonly MikuEngine.Core.Models.SkeletalModel _model;
-    private readonly List<Core.Models.DrawSegment> _blendedScratch = new();
     private bool _disposed;
 
     // uniform locations
     private readonly int _locSkinMatBase;
     private readonly int _locDiffuse, _locSpecular, _locShininess, _locAmbient;
-    private readonly int _locEnableTexture, _locEnableSphere, _locEnableToon, _locSphereMode, _locMaterialType;
+    private readonly int _locEnableTexture, _locEnableSphere, _locEnableToon, _locSphereMode;
     private readonly int _locDiffuseTex, _locSphereTex, _locToonTex;
 
     public Core.Models.SkeletalModel Model => _model;
@@ -90,7 +92,6 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         _locEnableSphere = gl.GetUniformLocation(_program, "uEnableSphere");
         _locEnableToon = gl.GetUniformLocation(_program, "uEnableToon");
         _locSphereMode = gl.GetUniformLocation(_program, "uSphereMode");
-        _locMaterialType = gl.GetUniformLocation(_program, "uMaterialType");
         _locDiffuseTex = gl.GetUniformLocation(_program, "uDiffuseTex");
         _locSphereTex = gl.GetUniformLocation(_program, "uSphereTex");
         _locToonTex = gl.GetUniformLocation(_program, "uToonTex");
@@ -103,7 +104,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
             ("uMaterialSpecular", _locSpecular), ("uMaterialShininess", _locShininess),
             ("uMaterialAmbient", _locAmbient), ("uEnableTexture", _locEnableTexture),
             ("uEnableSphere", _locEnableSphere), ("uEnableToon", _locEnableToon),
-            ("uSphereMode", _locSphereMode), ("uMaterialType", _locMaterialType),
+            ("uSphereMode", _locSphereMode),
             ("uDiffuseTex", _locDiffuseTex), ("uSphereTex", _locSphereTex),
             ("uToonTex", _locToonTex),
         })
@@ -233,44 +234,30 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         unit = 1; gl.Uniform1(_locSphereTex, unit);
         unit = 2; gl.Uniform1(_locToonTex, unit);
 
-        DrawQueue(Core.Models.MaterialRenderType.Opaque);
-        DrawQueue(Core.Models.MaterialRenderType.Cutout);
-
-        // Blended：按中心到相机的距离从远到近
-        var camera = new Vector3(frame.CameraPosition.X, frame.CameraPosition.Y, frame.CameraPosition.Z);
-        _blendedScratch.Clear();
-        foreach (var seg in _model.Segments)
-            if (seg.Type == Core.Models.MaterialRenderType.Blended)
-                _blendedScratch.Add(seg);
-        _blendedScratch.Sort((a, b) =>
-            (b.Center - camera).LengthSquared().CompareTo((a.Center - camera).LengthSquared()));
-        DrawSegments(_blendedScratch);
+        // ── 单一队列、按 PMX 材质顺序（对齐 PmxEditor，2026-09-10 修订）────────
+        // 反编译结论：fxd 只有 tec_model 一个 technique、单一 pass，且恒开
+        //   AlphaBlendEnable=True / SrcBlend=SRCALPHA / DestBlend=INVSRCALPHA
+        // fxd 与 C# 都**没有** ZWriteEnable / AlphaTestEnable —— D3D9 的
+        // ZWRITEENABLE 默认 TRUE，即 PE 对半透明材质也写深度、按材质顺序画、不排序。
+        //
+        // 之前的三队列（Opaque/Cutout/Blended + blended 关深度写 + 按距离排序）
+        // 是自创结构：a=1 的材质 SRCALPHA/INVSRCALPHA 本来就是恒等混合，
+        // 拆队列毫无收益，还会改变绘制顺序、破坏连续 alpha 渐变。
+        DrawSegments(_model.Segments);
 
         gl.BindVertexArray(0);
 
-        // 还原全局状态：Blended 队列关掉了 depth write、打开了 blend，
-        // 不还原的话下一帧的 grid / 其它渲染器会继承错误状态。
+        // 还原全局状态，避免污染下一帧的 grid / 其它渲染器
+        // （grid 是单面四边形，若继承了剔除状态且缠绕方向不合适会被整块剔掉）
         gl.DepthMask(true);
         gl.Disable(EnableCap.Blend);
+        gl.Disable(EnableCap.CullFace);
     }
 
-    private void DrawQueue(Core.Models.MaterialRenderType type)
+    private void DrawSegments(ReadOnlySpan<Core.Models.DrawSegment> segments)
     {
-        _blendedScratch.Clear();
-        foreach (var seg in _model.Segments)
-            if (seg.Type == type)
-                _blendedScratch.Add(seg);
-        DrawSegments(_blendedScratch);
-    }
-
-    private void DrawSegments(List<Core.Models.DrawSegment> segments)
-    {
-        if (segments.Count == 0) return;
-
         var gl = _device.Gl;
-        ApplyRenderState(gl, segments[0].Type);
-
-        foreach (var seg in segments)
+        foreach (ref readonly var seg in segments)
         {
             if (seg.IndexCount <= 0) continue;
 
@@ -285,7 +272,6 @@ public sealed unsafe class GlesModelRenderer : IDisposable
             gl.Uniform1(_locEnableSphere, seg.EnableSphere ? 1f : 0f);
             gl.Uniform1(_locEnableToon, seg.EnableToon ? 1f : 0f);
             gl.Uniform1(_locSphereMode, (float)(int)seg.SphereMode);
-            gl.Uniform1(_locMaterialType, (float)(int)seg.Type);
 
             gl.ActiveTexture(TextureUnit.Texture0);
             gl.BindTexture(TextureTarget.Texture2D, _textures.Get(seg.DiffuseTextureId));
@@ -294,32 +280,49 @@ public sealed unsafe class GlesModelRenderer : IDisposable
             gl.ActiveTexture(TextureUnit.Texture2);
             gl.BindTexture(TextureTarget.Texture2D, _textures.Get(seg.ToonTextureId));
 
+            // 逐材质设置剔除状态（PE 对每个材质都可能切一次）
+            ApplyRenderState(gl, seg.IsDoubleSided);
+
             gl.DrawElements(PrimitiveType.Triangles, (uint)seg.IndexCount, DrawElementsType.UnsignedInt,
                 (void*)(seg.IndexStart * sizeof(uint)));
         }
     }
 
     /// <summary>
-    /// docs/shader-design.md §3.3：Blended 关 depth write、开 blend；Opaque / Cutout 全开。
-    /// v1 不做 depth prepass，也不做背面剔除（避免任何面"消失"，便于静态核查）。
+    /// 对齐 PmxEditor（2026-09-10 修订）：
+    ///   · blend 恒开 SRC_ALPHA/INV_SRC_ALPHA（a=1 时是恒等混合，对不透明零副作用）
+    ///   · 深度写恒开、无 alpha test
+    ///   · <b>默认剔除背面</b>；材质带 PMX 両面（IsDoubleSided）flag 时关闭剔除
+    ///
+    /// 剔除这块的反编译证据（PmxEditorCore L25914-25934）：
+    /// <code>
+    ///   Cull renderState3 = d.GetRenderState&lt;Cull&gt;((RenderState)22);   // 保存
+    ///   for (int i = 0; i &lt; num; i++) {                                 // 逐材质
+    ///       if (m_both[i]) d.SetRenderState&lt;Cull&gt;((RenderState)22, (Cull)1);  // D3DCULL_NONE
+    ///       ef.BeginPass(0); d.DrawIndexedPrimitives(...); ef.EndPass();
+    ///       if (m_both[i]) d.SetRenderState&lt;Cull&gt;((RenderState)22, renderState3);  // 恢复
+    ///   }
+    /// </code>
+    /// 即：PE 默认用 D3D9 设备默认值 D3DCULL_CCW（正面为顺时针、剔除背面），
+    /// 仅当材质标了両面才临时切成 D3DCULL_NONE，画完立即恢复。
+    ///
+    /// 之前"恒不剔除"是错的：单面材质（本模型的 衣+/外套+/袖+/肌+，flag=0x1e）
+    /// 的背光内表面会被画出来 —— 它们法线背光 → ly=0 → 只剩环境色，叠在正面材质上就偏暗。
     /// </summary>
-    private static void ApplyRenderState(GL gl, Core.Models.MaterialRenderType type)
+    private static void ApplyRenderState(GL gl, bool doubleSided)
     {
         gl.Enable(EnableCap.DepthTest);
         gl.DepthFunc(DepthFunction.Lequal);
-        gl.Disable(EnableCap.CullFace);
 
-        if (type == Core.Models.MaterialRenderType.Blended)
-        {
-            gl.Enable(EnableCap.Blend);
-            gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
-            gl.DepthMask(false);
-        }
-        else
-        {
-            gl.Disable(EnableCap.Blend);
-            gl.DepthMask(true);
-        }
+        gl.Enable(EnableCap.CullFace);
+        gl.CullFace(TriangleFace.Back);
+        gl.FrontFace(FrontFaceDirection.CW);   // PMX/MMD 是 D3D9 LH 约定，正面为顺时针
+        if (doubleSided)
+            gl.Disable(EnableCap.CullFace);
+
+        gl.Enable(EnableCap.Blend);
+        gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+        gl.DepthMask(true);
     }
 
     public void Dispose()    {
