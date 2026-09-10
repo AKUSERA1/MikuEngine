@@ -1,13 +1,15 @@
-using System.Numerics;
 using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
 using Silk.NET.Windowing.Glfw;
+using Silk.NET.GLFW;
+using MikuEngine.Core.Camera;
 using MikuEngine.Render.GLES;
+using MikuEngine.Engine;
 
-// Silk.NET 2.x 在 Windows 上默认用 GLFW 后端，不需要显式注册
+// GLES 3.1 Demo — Foggy Grid Ground + OrbitCamera + OrbitInputController
 var options = WindowOptions.Default;
-options.Size = new (960, 600);           // System.Drawing.Size (Silk.NET 传递引用)
-options.Title = "MikuEngine GLES Demo — Foggy Grid Ground";
+options.Size = new Silk.NET.Maths.Vector2D<int>(960, 600);
+options.Title = "MikuEngine GLES — Foggy Grid Ground";
 options.WindowState = WindowState.Normal;
 options.VSync = true;
 
@@ -17,27 +19,64 @@ GL? gl = null;
 GlesDevice? device = null;
 GlesGridRenderer? grid = null;
 
-// 简化版轨道相机（右手坐标系，固定初始视角）
-var camera = new SimpleOrbitCamera
-{
-    Alpha = 0.785f,   // 45°
-    Beta = 0.785f,    // 45° 俯仰
-    Radius = 60f,
-    Target = Vector3.Zero,
-    Fov = MathF.PI / 4f,
-};
+// 初始视角：45° yaw + 60° pitch，距原点 100 单位
+var camera = new OrbitCamera(
+    alpha: MathF.PI / 4f,
+    beta: MathF.PI / 3f,
+    radius: 100f,
+    target: System.Numerics.Vector3.Zero,
+    fov: MathF.PI / 4f);
+
+// ── 引擎封装的输入控制器：调用方只需决定 enabled = true ──
+var input = new OrbitInputController(camera, enabled: true);
 
 window.Load += () =>
 {
-    // Loaded 事件中 GL context 已由 GLFW 建好
     gl = GL.GetApi((Silk.NET.Core.Contexts.IGLContext)window.GLContext!);
     var size = window.FramebufferSize;
     device = new GlesDevice(gl, size.X, size.Y);
     grid = new GlesGridRenderer(device);
 
+    // —— 平台层只做"原生事件 → 控制器方法"一行转发 ——
+    unsafe
+    {
+        var glfw = GlfwWindowing.GetExistingApi(window);
+        var hwnd = GlfwWindowing.GetHandle(window);
+
+        glfw.SetMouseButtonCallback(hwnd, (w, button, action, mods) =>
+        {
+            var btn = button switch
+            {
+                MouseButton.Left => OrbitInputController.PointerButton.Left,
+                MouseButton.Right => OrbitInputController.PointerButton.Right,
+                MouseButton.Middle => OrbitInputController.PointerButton.Middle,
+                _ => OrbitInputController.PointerButton.None,
+            };
+
+            glfw.GetCursorPos(hwnd, out double x, out double y);
+            if (action == InputAction.Press)
+                input.OnPointerDown(0, (float)x, (float)y, btn);
+            else if (action == InputAction.Release)
+                input.OnPointerUp(0);
+        });
+
+        glfw.SetCursorPosCallback(hwnd, (w, x, y) =>
+        {
+            input.OnPointerMove(0, (float)x, (float)y);
+        });
+
+        glfw.SetScrollCallback(hwnd, (w, xOff, yOff) =>
+        {
+            input.OnScroll((float)yOff);
+        });
+    }
+
     Console.WriteLine($"[Demo] GL version: {gl.GetStringS(StringName.Version)}");
     Console.WriteLine($"[Demo] GL renderer: {gl.GetStringS(StringName.Renderer)}");
     Console.WriteLine($"[Demo] Device ready. Framebuffer={size.X}x{size.Y}");
+    Console.WriteLine($"[Demo] Camera: pos={camera.Position:F2}, radius={camera.Radius:F1}, near={camera.Near:F2}, far={camera.Far:F0}");
+    Console.WriteLine($"[Demo] Input controller enabled: {input.Enabled}");
+    Console.WriteLine("[Demo] 鼠标: 左键=旋转 | 右键=平移 | 滚轮=缩放");
 };
 
 window.FramebufferResize += size =>
@@ -56,7 +95,8 @@ window.Render += dt =>
     float aspect = h > 0 ? (float)w / h : 1f;
     camera.Aspect = aspect;
 
-    Matrix4x4 viewProj = camera.ComputeViewProj();
+    Span<float> viewProj = stackalloc float[16];
+    camera.ComputeViewProj(viewProj);
     grid.Draw(viewProj);
 };
 
@@ -67,46 +107,3 @@ window.Closing += () =>
 };
 
 window.Run();
-
-sealed class SimpleOrbitCamera
-{
-    public float Alpha;
-    public float Beta;
-    public float Radius;
-    public Vector3 Target;
-    public float Fov = MathF.PI / 4f;
-    public float Aspect = 1f;
-    public float Near = 0.1f;
-    public float Far = 1000f;
-
-    private const float MinPitch = 0.01f;
-    private const float MaxPitch = MathF.PI - 0.01f;
-
-    public Vector3 Position => new(
-        Target.X + Radius * MathF.Sin(Beta) * MathF.Sin(Alpha),
-        Target.Y + Radius * MathF.Cos(Beta),
-        Target.Z + Radius * MathF.Sin(Beta) * MathF.Cos(Alpha));
-
-    public void Orbit(float dx, float dy)
-    {
-        const float sens = 0.005f;
-        Alpha += dx * sens;
-        Beta -= dy * sens;
-        Beta = MathF.Max(MinPitch, MathF.Min(MaxPitch, Beta));
-    }
-
-    public void Zoom(float dy)
-    {
-        const float sens = 0.05f;
-        Radius = MathF.Max(2f, Radius - dy * sens);
-        Near = MathF.Max(0.05f, Radius / 50f);
-        Far = MathF.Min(3000f, Radius * 20f);
-    }
-
-    public Matrix4x4 ComputeViewProj()
-    {
-        var proj = Matrix4x4.CreatePerspectiveFieldOfView(Fov, Aspect, Near, Far);
-        var view = Matrix4x4.CreateLookAt(Position, Target, Vector3.UnitY);
-        return Matrix4x4.Multiply(view, proj);
-    }
-}
