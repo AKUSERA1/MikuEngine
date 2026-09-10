@@ -3,11 +3,13 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
-    <!-- Rendering -->
-    <PackageVersion Include="Silk.NET.OpenGLES" Version="2.23.0" />
+    <!-- Rendering: Silk.NET.OpenGL 统一入口类 Silk.NET.OpenGL.GL，
+         在 Android 上自动加载 GLES 函数指针，桌面加载 OpenGL。 -->
+    <PackageVersion Include="Silk.NET.OpenGL" Version="2.23.0" />
     <PackageVersion Include="Silk.NET.Windowing" Version="2.23.0" />
     <PackageVersion Include="Silk.NET.Windowing.Glfw" Version="2.23.0" />
     <PackageVersion Include="Silk.NET.GLFW" Version="2.23.0" />
+    <PackageVersion Include="Silk.NET.Input" Version="2.23.0" />
 
     <!-- Texture decode -->
     <PackageVersion Include="SixLabors.ImageSharp" Version="3.1.12" />

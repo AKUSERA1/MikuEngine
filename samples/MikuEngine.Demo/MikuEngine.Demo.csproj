@@ -15,10 +15,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Desktop 窗口：Silk.NET.Windowing 负责建 GL context + 主循环 -->
     <PackageReference Include="Silk.NET.Windowing" />
     <PackageReference Include="Silk.NET.Windowing.Glfw" />
     <PackageReference Include="Silk.NET.GLFW" />
+    <PackageReference Include="Silk.NET.Input" />
+    <PackageReference Include="Silk.NET.OpenGL" />
   </ItemGroup>
 
 </Project>
