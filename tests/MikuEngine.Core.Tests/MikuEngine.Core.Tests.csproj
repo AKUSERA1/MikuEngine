@@ -24,4 +24,9 @@
     <ProjectReference Include="..\..\src\MikuEngine.Core\MikuEngine.Core.csproj" />
   </ItemGroup>
 
+  <!-- 测试用 PMX 模型：复制到 bin/Debug/.../TestModels/ 供 xunit FindTestModelsRoot 定位 -->
+  <ItemGroup>
+    <Content Include="TestModels\**\*.*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

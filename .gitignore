@@ -361,3 +361,17 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# IDE
+/.vscode/
+/.trae/
+/.workbuddy/
+
+# Doc&SampelModel
+/docs/
+/samples/MikuEngine.Demo/Model/
+/samples/MikuEngine.Demo/Motion/
+/tests/MikuEngine.Core.Tests/TestModels
+
+# DevReference
+/reference/
