@@ -24,12 +24,16 @@ uniform float uEnableTexture;
 uniform float uEnableSphere;
 uniform float uEnableToon;
 uniform float uSphereMode;   // 1 = Multiply, 2 = Add, 3 = SubTexture
+uniform float uToonMode;     // 0 = None, 1 = Type1(MMD), 2 = Type2(固有) —— PE L47
+uniform float uEnableSelfShadow;  // 0 关 / 1 自阴影 / 2 自阴影+床影
+uniform sampler2D uShadowMap;     // 影强度图（屏幕空间）
 
 layout(location = 0) in vec3  vNormal;
 layout(location = 1) in vec4  vColor;
 layout(location = 2) in vec2  vUv;
 layout(location = 3) in vec2  vUvSphere;
 layout(location = 4) in float vToonV;
+layout(location = 6) in vec4  vCameraClip;
 
 out vec4 fragColor;
 
@@ -63,9 +67,57 @@ void main()
     // 破坏 MMD 的连续渐变透明（如本模型的「袖透」Diffuse.a=0.8）。
     if (col.a <= 0.0) discard;
 
-    // Toon 查表（PE L554）—— U 用主 UV 的 x（toon 图在 U 方向恒定），V 用 ToonCf
+    // ── Toon / 自阴影（PE L546-590）────────────────────────────────────
+    // PE 的结构是「二选一」：
+    //   if (EnableSelfShadow) { ...影合成... }   ← 此时【不做】 col *= toonCol
+    //   else                  { col *= toonCol; }
+    // 这个分支关系必须照抄，否则开自阴影后亮度会对不上。
+    int toonMode = int(uToonMode + 0.5);
+    vec4 toonCol = vec4(1.0);
     if (uEnableToon > 0.5)
-        col *= texture(uToonTex, vec2(vUv.x, vToonV));
+    {
+        if (toonMode == 1)
+            toonCol = texture(uToonTex, vec2(vUv.x, vToonV));            // PE L554
+        else if (toonMode == 2)
+            toonCol = texture(uToonTex, vec2(vUv.x, vToonV * vToonV));   // PE L560: p*p
+    }
+
+    if (uEnableSelfShadow > 0.5)
+    {
+        // 影强度图是【屏幕空间】的（见 shadow.vert.glsl uCameraSpace）：
+        // 按片元自己的屏幕坐标取回 —— 等价于 PE PS1 L565 的
+        //   uv = getShadowTexPos(p_in.Depth)   // 主渲染里 Depth = 相机裁剪坐标
+        //
+        // ⚠️ 这里【不能】用光源裁剪坐标算 uv：那是光源屏幕坐标，取回的是"别人的"判定。
+        //    （历史上就是这么写的：suv = vLightPos.xy/w * vec2(0.5,-0.5) + 0.5 —— 两个错叠在一起。）
+        // ⚠️ 也【不能】照抄 PE 的 float2(0.5,-0.5) 做 Y 翻转：那个负号是 D3D9 的
+        //    "渲染目标 v=0 在图像上方"约定；GL 的 FBO 纹理 v=0 就在下方，
+        //    写入时 v = ndc.y*0.5+0.5、读取也必须用同一个映射，翻转会上下镜像。
+        vec2 suv = vCameraClip.xy / vCameraClip.w * 0.5 + 0.5;
+        float cc = texture(uShadowMap, suv).r;                        // 0 受光 ~ 1 全影
+        // cf = 亮度(LightColor) * g_selfStrength(0.6)
+        float cf = dot(vec3(0.299, 0.587, 0.114), vec3(0.5)) * 0.6;   // LightColor 固定 0.5 灰
+
+        if (toonMode == 0)
+        {
+            // PE L569-575：只降亮度（YCrCb 的 Y），等价于 RGB 同比例缩放
+            float y0 = dot(col.rgb, vec3(0.299, 0.587, 0.114));
+            float k  = (1.0 - cf * cc);
+            col.rgb *= (y0 > 1e-5) ? (y0 * k / y0) : 0.0;
+        }
+        else
+        {
+            // PE L578-585：与 toon(0,1) 角点色合成，cf2 有 4 倍固定增益
+            vec4 toon = texture(uToonTex, vec2(0.0, 1.0));
+            vec4 shadowCol = col * toon;
+            float cf2 = cf * cc * 4.0;
+            col = col * (1.0 - cf2) + shadowCol * cf2;
+        }
+    }
+    else
+    {
+        col *= toonCol;                                              // PE L588-590
+    }
 
     // Straight alpha，blend 由固定管线 SRC_ALPHA/INV_SRC_ALPHA 完成
     fragColor = col;

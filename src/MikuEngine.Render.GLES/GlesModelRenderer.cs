@@ -26,6 +26,9 @@ public struct FrameUniforms
     /// <summary>PmxEditor fxd L25：(0.07, 0.07, 0.07, 1)。</summary>
     public Vector4 BaseAmbient;
 
+    /// <summary>光源 ViewProj（WVP_Light），自阴影 Z 图 / 影强度图 / 床影采样用。</summary>
+    public Matrix4x4 LightViewProj;
+
     public static FrameUniforms Default() => new()
     {
         ViewProj = Matrix4x4.Identity,
@@ -62,6 +65,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     private readonly GlesTextureLibrary _textures;
     private readonly MikuEngine.Core.Models.SkeletalModel _model;
     private readonly bool _hasEdge;
+    private float uToonMode = 1f;
     private bool _disposed;
 
     // uniform locations
@@ -72,11 +76,31 @@ public sealed unsafe class GlesModelRenderer : IDisposable
 
     // edge program 的 uniform
     private readonly int _locEdgeSkinMatBase, _locEdgeColor, _locEdgeSize;
+    private readonly int _locSelfShadow, _locToonMode, _locShadowMap;
 
     public Core.Models.SkeletalModel Model => _model;
 
     /// <summary>轮廓线开关（对应 PmxEditor 的 chkEdge）。默认开。</summary>
     public bool EdgeVisible { get; set; } = true;
+
+    /// <summary>自阴影开关（对应 MMD 影模式 1/2，0=关）。默认关闭。</summary>
+    public int SelfShadowMode { get; set; } = 0;
+
+    /// <summary>
+    /// 影强度图（<see cref="GlesShadowRenderer.MaskTexture"/>），采样器单元 4。
+    ///
+    /// ⚠️ 必须真的绑上：GL 里"声明了 sampler 但没绑纹理"不会报错，
+    /// 采样不完整的默认纹理对象会**恒返回 (0,0,0,1)**，于是 cc=0、颜色一点不变 ——
+    /// 表现为"自阴影完全无效但没有任何错误"。这就是 P0-1。
+    ///
+    /// 0 表示未提供：此时不绑定，行为与"无自阴影"一致（安全降级，不会变全黑）。
+    /// </summary>
+    public uint ShadowMaskTexture { get; set; }
+
+    // 供自阴影 pass 复用（同一份蒙皮 SSBO 与 per-frame UBO）
+    public uint Vao => _vao;
+    public uint FrameUbo => _frameUbo;
+    public uint SkinSsbo => _skin.BufferId;
     public GlesTextureLibrary Textures => _textures;
     public int SkinMatrixBaseOffset { get; private set; }
 
@@ -101,6 +125,9 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         _locEnableSphere = gl.GetUniformLocation(_program, "uEnableSphere");
         _locEnableToon = gl.GetUniformLocation(_program, "uEnableToon");
         _locSphereMode = gl.GetUniformLocation(_program, "uSphereMode");
+        _locSelfShadow = gl.GetUniformLocation(_program, "uEnableSelfShadow");
+        _locToonMode = gl.GetUniformLocation(_program, "uToonMode");
+        _locShadowMap = gl.GetUniformLocation(_program, "uShadowMap");
         _locDiffuseTex = gl.GetUniformLocation(_program, "uDiffuseTex");
         _locSphereTex = gl.GetUniformLocation(_program, "uSphereTex");
         _locToonTex = gl.GetUniformLocation(_program, "uToonTex");
@@ -113,7 +140,8 @@ public sealed unsafe class GlesModelRenderer : IDisposable
             ("uMaterialSpecular", _locSpecular), ("uMaterialShininess", _locShininess),
             ("uMaterialAmbient", _locAmbient), ("uEnableTexture", _locEnableTexture),
             ("uEnableSphere", _locEnableSphere), ("uEnableToon", _locEnableToon),
-            ("uSphereMode", _locSphereMode),
+            ("uSphereMode", _locSphereMode), ("uEnableSelfShadow", _locSelfShadow),
+            ("uToonMode", _locToonMode), ("uShadowMap", _locShadowMap),
             ("uDiffuseTex", _locDiffuseTex), ("uSphereTex", _locSphereTex),
             ("uToonTex", _locToonTex),
         })
@@ -241,17 +269,29 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         return lib.Load(path, toon);
     }
 
-    /// <summary>每帧调用。</summary>
-    public void Draw(in FrameUniforms frame)
+    /// <summary>
+    /// 上传 per-frame UBO。自阴影的影图 pass 复用这份 UBO，
+    /// 因此【必须先于】<see cref="RenderShadowMaps"/> 调用，否则影图会用到上一帧的矩阵。
+    /// </summary>
+    public void UploadFrame(in FrameUniforms frame)
     {
+        var uniforms = frame;
+        _device.UpdateUbo(_frameUbo, ref uniforms);
+    }
+
+    /// <summary>每帧调用。</summary>
+    /// <param name="toonMode">0=无 1=MMD toon 2=固有（PE 的 ToonMode）</param>
+    public void Draw(in FrameUniforms frame, float toonMode = 1f)
+    {
+        uToonMode = toonMode;
         var gl = _device.Gl;
 
         _model.UpdateWorldMatrices();
 
         gl.UseProgram(_program);
 
-        var uniforms = frame;
-        _device.UpdateUbo(_frameUbo, ref uniforms);
+        UploadFrame(in frame);
+        var gl2 = gl; _ = gl2;
         gl.BindBufferBase(BufferTargetARB.UniformBuffer, 0, _frameUbo);
 
         _skin.BeginFrame();
@@ -267,6 +307,17 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         unit = 0; gl.Uniform1(_locDiffuseTex, unit);
         unit = 1; gl.Uniform1(_locSphereTex, unit);
         unit = 2; gl.Uniform1(_locToonTex, unit);
+        unit = 4; gl.Uniform1(_locShadowMap, unit);   // 3 被 shadow renderer 的 Z 图占用
+
+        // 影强度图绑到 unit 4（P0-1）。缺这一步不会报错，只会让自阴影静默失效。
+        //
+        // ⚠️ ShadowMaskTexture == 0 时必须【显式解绑】：GL 的纹理绑定是粘滞状态，
+        //    只"跳过 bind"并不会把上一帧绑上去的纹理摘下来 —— 那样做隔离实验会得到
+        //    "A、B 两帧校验和完全相同"的假结果（踩过）。
+        //    绑定 0 之后该 unit 是不完整纹理，采样恒返回 (0,0,0,1)，即 cc≡0。
+        gl.ActiveTexture(TextureUnit.Texture4);
+        gl.BindTexture(TextureTarget.Texture2D, ShadowMaskTexture);
+        gl.ActiveTexture(TextureUnit.Texture0);
 
         // ── 单一队列、按 PMX 材质顺序（对齐 PmxEditor，2026-09-10 修订）────────
         // 反编译结论：fxd 只有 tec_model 一个 technique、单一 pass，且恒开
@@ -310,6 +361,8 @@ public sealed unsafe class GlesModelRenderer : IDisposable
             gl.Uniform1(_locEnableSphere, seg.EnableSphere ? 1f : 0f);
             gl.Uniform1(_locEnableToon, seg.EnableToon ? 1f : 0f);
             gl.Uniform1(_locSphereMode, (float)(int)seg.SphereMode);
+            gl.Uniform1(_locSelfShadow, (float)SelfShadowMode);
+            gl.Uniform1(_locToonMode, uToonMode);
 
             gl.ActiveTexture(TextureUnit.Texture0);
             gl.BindTexture(TextureTarget.Texture2D, _textures.Get(seg.DiffuseTextureId));

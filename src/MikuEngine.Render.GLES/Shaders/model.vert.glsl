@@ -26,6 +26,7 @@ layout(binding = 0) uniform FrameBlock {
     vec4 uLightColor;
     vec4 uAmbientColor;
     vec4 uBaseAmbient;      // (0.07, 0.07, 0.07, 1) —— PE L25
+    mat4 uLightViewProj;    // WVP_Light：自阴影 / 床影用
 } uFrame;
 
 // ── 蒙皮矩阵 SSBO (binding 1) ───────────────────────────────────────────
@@ -54,6 +55,7 @@ layout(location = 1) out vec4  vColor;
 layout(location = 2) out vec2  vUv;
 layout(location = 3) out vec2  vUvSphere;
 layout(location = 4) out float vToonV;
+layout(location = 6) out vec4  vCameraClip;   // 相机裁剪坐标：自阴影按【屏幕】坐标取回影强度图
 
 void main()
 {
@@ -118,5 +120,8 @@ void main()
     // ToonCf（PE L480-485）：dot(n, LightDirect) * 0.5 + 0.5
     vToonV = dot(nWorld, normalize(uFrame.uLightDirection.xyz)) * 0.5 + 0.5;
 
-    gl_Position = uFrame.uViewProj * sp;
+    // 相机裁剪坐标（= gl_Position）：影强度图是屏幕空间的，主渲染要按【自己的屏幕位置】取回它
+    vCameraClip = uFrame.uViewProj * sp;
+
+    gl_Position = vCameraClip;
 }

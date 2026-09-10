@@ -1,4 +1,4 @@
-using System.Numerics;
+﻿using System.Numerics;
 using System.Runtime.InteropServices;
 using Silk.NET.OpenGL;
 
@@ -108,6 +108,18 @@ public sealed unsafe class GlesGridRenderer : IDisposable
     }
 
     /// <summary>每帧调用：写入列主序 view-proj 矩阵并绘制。</summary>
+    /// <remarks>
+    /// 地面格网**不写深度**（只做深度测试），理由：
+    ///   ① 地板/格网是"背景"，模型已经在它之前画完并写好深度，格网仍会被模型正确遮挡；
+    ///   ② 与同处 y=0 的**床影 overlay 共面**。如果格网写深度，后画的床影就要靠
+    ///      浮点深度恰好大于等于格网才能通过 Lequal —— 两个四边形的三角化与插值不同，
+    ///      逐象素深度会有几个 ULP 的差，就会出现斑纹闪烁（z-fight）。
+    ///      把格网的深度写入关掉，两者之间根本不存在深度比较，问题从机制上消失。
+    ///
+    /// 参考 PE：PE 的床影 pass 同样写 <c>ZWRITEENABLE = false</c>（fxd 的 tec_floorShadow 开混合、
+    /// DrawModel_Shadow 关深度写），使影纯为"贴地 overlay"。PE 视口没有格网，
+    /// 本仓的格网是自有的，因此两侧都要让出深度写入才能彻底消除共面争用。
+    /// </remarks>
     public void Draw(ReadOnlySpan<float> viewProjColMajor16)
     {
         var gl = _device.Gl;
@@ -117,7 +129,14 @@ public sealed unsafe class GlesGridRenderer : IDisposable
         gl.UseProgram(_program);
         gl.BindVertexArray(_vao);
         gl.BindBufferBase(BufferTargetARB.UniformBuffer, 0, _ubo);
+
+        gl.Enable(EnableCap.DepthTest);
+        gl.DepthFunc(DepthFunction.Lequal);
+        gl.DepthMask(false);          // ← 关键：地面不写深度
+
         gl.DrawArrays(PrimitiveType.TriangleStrip, 0, 4);
+
+        gl.DepthMask(true);           // 还原，避免影响后续 pass
         gl.BindVertexArray(0);
     }
 
