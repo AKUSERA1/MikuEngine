@@ -1,0 +1,20 @@
+# Core 模块 — MikuEngine.Core
+
+Core 层是**纯数学 / 纯数据**，零平台依赖、零渲染 API 依赖。  
+这意味着 Core 层可以直接跑在 **单元测试、Android、iOS、WebAssembly** 上，无需任何条件编译。
+
+## 设计原则
+
+1. **左手坐标系 + Y-up**，与 MikuMikuDance 原生约定完全一致
+2. **矩阵输出列主序 `float[16]`**，GLSL `mat4` 直接读取，无需转置
+3. **投影使用 GLES 3.1 默认风格**（z_clip ∈ [-w, +w]），不用 Vulkan/WebGPU 的 [0, w]
+4. **不内置灵敏度缩放** —— Core 是纯变换，Engine 层（OrbitInputController）负责灵敏度
+
+## 文档列表
+
+| 文档 | 说明 |
+|---|---|
+| [coordinate-system.md](coordinate-system.md) | **必读**——坐标系约定、矩阵布局、投影公式 |
+| [orbit-camera.md](orbit-camera.md) | 轨道相机完整 API |
+| [pmx-parser.md](pmx-parser.md) | 🚧 待实现 |
+| [mmd-math.md](mmd-math.md) | 🚧 待实现 |
