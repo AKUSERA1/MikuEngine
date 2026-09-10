@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/MikuEngine.Demo/MikuEngine.Demo.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/MikuEngine.Core/MikuEngine.Core.csproj" />
+    <Project Path="src/MikuEngine.Engine/MikuEngine.Engine.csproj" />
+    <Project Path="src/MikuEngine.Physics/MikuEngine.Physics.csproj" />
+    <Project Path="src/MikuEngine.Render.GLES/MikuEngine.Render.GLES.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MikuEngine.Core.Tests/MikuEngine.Core.Tests.csproj" />
+    <Project Path="tests/MikuEngine.Physics.Tests/MikuEngine.Physics.Tests.csproj" />
+  </Folder>
+</Solution>
