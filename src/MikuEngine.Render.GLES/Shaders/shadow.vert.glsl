@@ -22,7 +22,11 @@ layout(binding = 0) uniform FrameBlock {
 
 layout(std430, binding = 1) buffer SkinMatricesBlock { mat4 uSkinMatrices[]; };
 
+// 顶点 morph 偏移（binding 2）—— 影子必须跟着表情走，否则眨眼时影图与脸不同步。
+layout(std430, binding = 2) buffer MorphBlock { vec4 uMorphOffsets[]; };
+
 uniform float uSkinMatBase;
+uniform float uMorphEnabled;     // 0 = 模型无顶点 morph
 
 layout(location = 0) in vec3  aPosition;
 layout(location = 1) in vec3  aNormal;
@@ -39,15 +43,17 @@ void main()
     uint  j[4] = uint[4](aJoints.x, aJoints.y, aJoints.z, aJoints.w);
     float wsum = w[0] + w[1] + w[2] + w[3];
 
+    vec3 morphPos = aPosition + (uMorphEnabled > 0.5 ? uMorphOffsets[gl_VertexID].xyz : vec3(0.0));
+
     vec4 sp = vec4(0.0);
     if (wsum > 1e-5)
     {
         for (int k = 0; k < 4; k++)
-            sp += uSkinMatrices[base + int(j[k])] * vec4(aPosition, 1.0) * (w[k] / wsum);
+            sp += uSkinMatrices[base + int(j[k])] * vec4(morphPos, 1.0) * (w[k] / wsum);
     }
     else
     {
-        sp = uSkinMatrices[base] * vec4(aPosition, 1.0);
+        sp = uSkinMatrices[base] * vec4(morphPos, 1.0);
     }
 
     vUv = aUv.xy;

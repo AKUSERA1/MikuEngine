@@ -73,6 +73,8 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     private readonly uint _vao, _vbo, _ebo;
     private readonly uint _frameUbo;
     private readonly GlesSkinMatricesBuffer _skin;
+    private readonly GlesMorphBuffer _morph;
+    private readonly bool _hasVertexMorph;
     private readonly GlesTextureLibrary _textures;
     private readonly MikuEngine.Core.Models.SkeletalModel _model;
     private readonly bool _hasEdge;
@@ -81,12 +83,13 @@ public sealed unsafe class GlesModelRenderer : IDisposable
 
     // uniform locations
     private readonly int _locSkinMatBase;
+    private readonly int _locMorphEnabled;
     private readonly int _locDiffuse, _locSpecular, _locShininess, _locAmbient;
     private readonly int _locEnableTexture, _locEnableSphere, _locEnableToon, _locSphereMode;
     private readonly int _locDiffuseTex, _locSphereTex, _locToonTex;
 
     // edge program 的 uniform
-    private readonly int _locEdgeSkinMatBase, _locEdgeColor, _locEdgeSize;
+    private readonly int _locEdgeSkinMatBase, _locEdgeColor, _locEdgeSize, _locEdgeMorphEnabled;
     private readonly int _locSelfShadow, _locToonMode;
     private readonly int _locShadowZMap, _locShadowTexel, _locSelfShadowStrength;
     private readonly int _locShadowStyle, _locShadowColor, _locShadowBias, _locShadowBiasMax, _locShadowSlopeBias, _locShadowSoftness, _locShadowEdge;
@@ -165,6 +168,16 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     public uint Vao => _vao;
     public uint FrameUbo => _frameUbo;
     public uint SkinSsbo => _skin.BufferId;
+
+    /// <summary>顶点 morph 偏移 SSBO（binding 2）；始终有效（无 morph 时是 1 元素哑缓冲）。</summary>
+    public uint MorphSsbo => _morph.BufferId;
+
+    /// <summary>模型是否有顶点 morph（决定 <c>uMorphEnabled</c> 与是否可安全读 binding 2）。</summary>
+    public bool MorphEnabled => _hasVertexMorph;
+
+    /// <summary>最近一帧累加过的顶点数（诊断用；0 = 本帧没有活跃表情）。</summary>
+    public int MorphTouchedVertexCount => _morph.LastTouchedVertexCount;
+
     public GlesTextureLibrary Textures => _textures;
     public int SkinMatrixBaseOffset { get; private set; }
 
@@ -181,6 +194,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
             "MikuEngine.Render.GLES.Shaders.model.frag.glsl");
 
         _locSkinMatBase = gl.GetUniformLocation(_program, "uSkinMatBase");
+        _locMorphEnabled = gl.GetUniformLocation(_program, "uMorphEnabled");
         _locDiffuse = gl.GetUniformLocation(_program, "uMaterialDiffuse");
         _locSpecular = gl.GetUniformLocation(_program, "uMaterialSpecular");
         _locShininess = gl.GetUniformLocation(_program, "uMaterialShininess");
@@ -210,7 +224,8 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         // 后续 glUniform* 会静默失效 —— 曾因此导致整体贴图丢失，这里显式暴露。
         foreach (var (name, loc) in new (string, int)[]
         {
-            ("uSkinMatBase", _locSkinMatBase), ("uMaterialDiffuse", _locDiffuse),
+            ("uSkinMatBase", _locSkinMatBase), ("uMorphEnabled", _locMorphEnabled),
+            ("uMaterialDiffuse", _locDiffuse),
             ("uMaterialSpecular", _locSpecular), ("uMaterialShininess", _locShininess),
             ("uMaterialAmbient", _locAmbient), ("uEnableTexture", _locEnableTexture),
             ("uEnableSphere", _locEnableSphere), ("uEnableToon", _locEnableToon),
@@ -238,11 +253,13 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         _locEdgeSkinMatBase = gl.GetUniformLocation(_edgeProgram, "uSkinMatBase");
         _locEdgeColor = gl.GetUniformLocation(_edgeProgram, "uMaterialEdgeColor");
         _locEdgeSize = gl.GetUniformLocation(_edgeProgram, "uMaterialEdgeSize");
+        _locEdgeMorphEnabled = gl.GetUniformLocation(_edgeProgram, "uMorphEnabled");
         foreach (var (name, loc) in new (string, int)[]
         {
             ("uSkinMatBase", _locEdgeSkinMatBase),
             ("uMaterialEdgeColor", _locEdgeColor),
             ("uMaterialEdgeSize", _locEdgeSize),
+            ("uMorphEnabled", _locEdgeMorphEnabled),
         })
         {
             if (loc < 0)
@@ -288,6 +305,11 @@ public sealed unsafe class GlesModelRenderer : IDisposable
 
         _frameUbo = device.CreateUbo((nuint)sizeof(FrameUniforms));
         _skin = new GlesSkinMatricesBuffer(device, model.BoneCount);
+
+        // 顶点 morph：没有顶点 morph 的模型也建一条 1 元素哑缓冲，保证 shader 里 binding 2
+        // 始终有缓冲可绑；是否读它由 uMorphEnabled 决定（见 GlesMorphBuffer 注释）。
+        _hasVertexMorph = model.VertexMorphs.Length > 0;
+        _morph = new GlesMorphBuffer(device, _hasVertexMorph ? model.VertexCount : 0);
     }
 
     private static bool HasAnyEdge(Core.Models.SkeletalModel model)
@@ -375,6 +397,10 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         _skin.BeginFrame();
         SkinMatrixBaseOffset = _skin.Append(_model.SkinMatrices);
         _skin.Flush();
+
+        // 顶点 morph 偏移：只重算「活跃 morph 的受影响顶点」并上传脏区（内存/带宽都是 O(顶点数)，
+        // 与 morph 数量无关）。必须与蒙皮矩阵同帧提交 —— 影图 pass 与主渲染都读这一份。
+        _morph.Update(_model, _model.MorphWeights);
     }
 
     /// <summary>每帧调用。必须先调用 <see cref="PrepareFrame"/>。</summary>
@@ -389,6 +415,11 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         gl.BindBufferBase(BufferTargetARB.UniformBuffer, 0, _frameUbo);
         _skin.Bind(1);
         gl.Uniform1(_locSkinMatBase, (float)SkinMatrixBaseOffset);
+
+        // 顶点 morph：偏移 SSBO 绑 binding 2，并用 uMorphEnabled 区分「模型无顶点 morph」
+        // （此时缓冲里全是 0，但 shader 干脆不读）。
+        _morph.Bind(2);
+        gl.Uniform1(_locMorphEnabled, _hasVertexMorph ? 1f : 0f);
 
         gl.BindVertexArray(_vao);
 
@@ -492,6 +523,9 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         var gl = _device.Gl;
         gl.UseProgram(_edgeProgram);
         gl.Uniform1(_locEdgeSkinMatBase, (float)SkinMatrixBaseOffset);
+        // 轮廓线必须用与主渲染同一份顶点 morph 偏移，否则外扩壳会与本体错位。
+        _morph.Bind(2);
+        gl.Uniform1(_locEdgeMorphEnabled, _hasVertexMorph ? 1f : 0f);
 
         int unit = 0; _ = unit;   // edge 不采样纹理
 
@@ -568,6 +602,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         gl.DeleteProgram(_program);
         gl.DeleteProgram(_edgeProgram);
         _skin.Dispose();
+        _morph.Dispose();
         _textures.Dispose();
     }
 }

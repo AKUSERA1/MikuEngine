@@ -30,10 +30,19 @@ layout(std430, binding = 1) buffer SkinMatricesBlock {
     mat4 uSkinMatrices[];
 };
 
+// ── 顶点 morph 偏移 SSBO (binding 2) ────────────────────────────────────
+// PMX 顶点 morph 的偏移是【模型空间】量，必须在蒙皮之前加到 aPosition 上。
+// 索引直接用 gl_VertexID —— glDrawElements 下它等于顶点索引（不是元素序号）。
+// 每帧只上传脏区，未受影响顶点的偏移恒为 0。
+layout(std430, binding = 2) buffer MorphBlock {
+    vec4 uMorphOffsets[];    // xyz = 偏移，w 未用（std430 下 vec4 数组 stride = 16B）
+};
+
 // ── per-draw uniforms ───────────────────────────────────────────────────
 // 全部用 float：C# 侧统一走 glUniform1f。若这里声明成 int 而上传用 1f，
 // 则会触发 GL_INVALID_OPERATION 且 uniform 保持默认值 0 —— 纹理就会整体失效。
 uniform float uSkinMatBase;      // 当前角色在 SSBO 里的骨骼起点
+uniform float uMorphEnabled;     // 0 = 模型无顶点 morph（此时不读 binding 2）
 uniform vec4  uMaterialDiffuse;  // rgb = 材质色, a = MMD 非透过度
 uniform vec4  uMaterialSpecular;
 uniform float uMaterialShininess;
@@ -63,6 +72,10 @@ void main()
 
     float wsum = w[0] + w[1] + w[2] + w[3];
 
+    // 顶点 morph：先加偏移，再蒙皮（PMX 顶点 morph 偏移是模型空间量）。
+    // 下面两个分支（正常 / 权重全零退化）都必须用 morphPos，否则脏数据顶点会跳回未变形位置。
+    vec3 morphPos = aPosition + (uMorphEnabled > 0.5 ? uMorphOffsets[gl_VertexID].xyz : vec3(0.0));
+
     vec4 sp = vec4(0.0);
     vec3 sn = vec3(0.0);
 
@@ -72,7 +85,7 @@ void main()
         {
             float wk = w[k] / wsum;
             mat4 m = uSkinMatrices[base + int(j[k])];
-            sp += m * vec4(aPosition, 1.0) * wk;
+            sp += m * vec4(morphPos, 1.0) * wk;
             sn += mat3(m) * aNormal * wk;
         }
     }
@@ -80,7 +93,7 @@ void main()
     {
         // 权重全零（脏数据）：退化成第 0 根骨，避免顶点塌陷到原点
         mat4 m = uSkinMatrices[base];
-        sp = m * vec4(aPosition, 1.0);
+        sp = m * vec4(morphPos, 1.0);
         sn = mat3(m) * aNormal;
     }
 

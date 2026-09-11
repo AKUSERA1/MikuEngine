@@ -72,6 +72,8 @@ bool poseApplied = false;
 MmdAnimation? animation = null;
 MmdAnimationPlayer? animPlayer = null;
 bool animationEnabled = true;
+bool morphEnabled = true;      // M 键切换：关时把表情权重全清零（回归基线用）
+bool morphDiagPrinted = false; // 首次有表情真正生效时打一条诊断
 
 window.Load += () =>
 {
@@ -115,6 +117,11 @@ window.Load += () =>
     Console.WriteLine($"[Demo] 蒙皮矩阵 {m.BoneCount * 64 / 1024.0:F1} KB → SSBO" +
                       $"（UBO 最小保证仅 16 KB，这里必须用 SSBO）");
     Console.WriteLine($"[Demo] 纹理库：{model.Textures.Count - 1} 张已加载");
+    Console.WriteLine($"[Demo] 表情（morph）：{m.MorphNames.Length} 条 | 顶点 {m.VertexMorphs.Length} / UV {m.UvMorphs.Length} / " +
+                      $"骨 {m.BoneMorphs.Length} / 材质 {m.MaterialMorphs.Count(e => e is not null)} / " +
+                      $"组 {m.GroupMorphs.Count(g => g is not null)}" +
+                      $" | 顶点 morph 上 GPU：{(model.MorphEnabled ? "开" : "关（该模型无顶点 morph）")}" +
+                      "（Flip/Impulse 按设计不支持，见 docs/2026-09-11-anim-morph-plan.md §0.2）");
     Console.WriteLine($"[Demo] 包围盒 min={Fmt(m.BoundsMin)} max={Fmt(m.BoundsMax)} size={Fmt(m.BoundsSize)}");
 
     // ── 按包围盒定位相机 ────────────────────────────────────────────────
@@ -257,10 +264,27 @@ window.Load += () =>
                 animPlayer.Seek(animPlayer.StartFrame);
                 Console.WriteLine($"[Demo] 动画帧：{animPlayer.CurrentFrame:F1}（首帧）");
             }
+            else if (key == Keys.M)
+            {
+                morphEnabled = !morphEnabled;
+                if (!morphEnabled) model?.Model.ResetMorphWeights();
+                int active = 0;
+                if (model != null)
+                    foreach (float weight in model.Model.MorphWeights)
+                        if (weight != 0f) active++;
+                Console.WriteLine($"[Demo] 表情驱动：{(morphEnabled ? "开" : "关")}" +
+                                  $" | 模型 {model?.Model.MorphNames.Length ?? 0} 条" +
+                                  $" | 当前活跃 {active} 条" +
+                                  $" | 本帧脏区顶点 {model?.MorphTouchedVertexCount ?? 0}");
+            }
             else if (key == Keys.V)
             {
                 animationEnabled = !animationEnabled;
-                if (!animationEnabled) target.Model.ResetPose();
+                if (!animationEnabled)
+                {
+                    target.Model.ResetPose();
+                    target.Model.ResetMorphWeights();   // 表情也一并复位，避免残留
+                }
                 Console.WriteLine($"[Demo] 动画驱动：{(animationEnabled ? "开" : "关（B/R 静态姿势测试可用）")}");
             }
             else if (key == Keys.Z)
@@ -295,7 +319,7 @@ window.Load += () =>
     }
 
     Console.WriteLine("[Demo] 鼠标: 左键=旋转 | 右键=平移 | 滚轮=缩放 | B=弯曲测试 | E=轮廓线 | 1/2/0=自阴影 | S=影风格 | Z=中间RT预览 | R=重置");
-    Console.WriteLine("[Demo] 动画: 空格=暂停 | ←/→=∓1帧 | ↑/↓=帧率±6 | Home=首帧 | V=动画驱动开关");
+    Console.WriteLine("[Demo] 动画: 空格=暂停 | ←/→=∓1帧 | ↑/↓=帧率±6 | Home=首帧 | V=动画驱动开关 | M=表情驱动开关");
 
     if (smoke)
     {
@@ -340,14 +364,31 @@ window.Render += dt =>
         frame.LightViewProj = shadow?.LightViewProj ?? System.Numerics.Matrix4x4.Identity;
         // 里程碑 A：先推进动画帧号 → 采样写入局部 T/R（纯函数，先整体复位到绑定姿势）→
         //   再由 PrepareFrame 重算世界/蒙皮矩阵并上传。影图 pass 与主渲染读同一份本帧姿态。
+        // 里程碑 B（Step 5a-1）：采样只写「原始」表情权重，随后由 MmdMorphEvaluator 做 Group
+        //   传播并把骨 morph 折进局部 T/R —— 必须早于 PrepareFrame 的 UpdateWorldMatrices。
         if (animation != null && animPlayer != null && animationEnabled)
         {
             animPlayer.Advance(dt);
             animation.Sample(model.Model, animPlayer.CurrentFrame);
+            // M 键关掉表情驱动时把权重清零（VMD 的 morph 轨道不再生效）：
+            // 用于「权重全 0 ⇒ 画面与 Step 4 完全一致」的回归基线。
+            if (!morphEnabled) model.Model.ResetMorphWeights();
+            MmdMorphEvaluator.Evaluate(model.Model);
         }
         // 阶段 0：帧首统一上传（重算蒙皮矩阵 + UBO + 蒙皮 SSBO），
         // 影图 pass 与主渲染都读同一份、且是本帧的最新值（修复了上一帧滞后的坑）。
         model.PrepareFrame(in frame);
+
+        // 表情管线首次真正动起来时打一条诊断（证明「权重 → 稀疏累加 → 脏区上传」是活的）。
+        if (!morphDiagPrinted && morphEnabled && model.MorphTouchedVertexCount > 0)
+        {
+            int active = 0;
+            foreach (float weight in model.Model.MorphWeights)
+                if (weight != 0f) active++;
+            Console.WriteLine($"[Demo] 表情首次激活：活跃 {active} 条 | 本帧脏区顶点 {model.MorphTouchedVertexCount} | " +
+                              $"顶点 morph 上传 {(model.MorphEnabled ? "开" : "关")}");
+            morphDiagPrinted = true;
+        }
 
         if (shadow != null && shadow.Enabled)
             shadow.RenderShadowMaps(device, model, w, h);

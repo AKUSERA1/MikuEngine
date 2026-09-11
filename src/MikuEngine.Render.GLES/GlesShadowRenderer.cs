@@ -308,6 +308,9 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         gl.UseProgram(_zProg);
         BindCommon(_zProg);
         gl.Uniform1(U(_zProg, "uSkinMatBase"), (float)baseOffset);
+        // 顶点 morph：Z pass 与主渲染共用同一份偏移，否则表情变形后影子会对不上。
+        gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, 2, model.MorphSsbo);
+        gl.Uniform1(U(_zProg, "uMorphEnabled"), model.MorphEnabled ? 1f : 0f);
         int texUnit = 0; gl.Uniform1(U(_zProg, "uDiffuseTex"), texUnit);
 
         // 光栅化斜率偏置：factor=斜率 1.5 / units=常数 2。

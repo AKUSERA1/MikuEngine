@@ -200,13 +200,19 @@ public sealed class MmdMorphTrack
 {
     public string Name = "";
 
-    /// <summary>绑定到模型后的 morph 索引；-1 = 未绑定。</summary>
-    public int MorphIndex = -1;
+    /// <summary>
+    /// 绑定到模型后的 morph 索引（<b>可能多个</b> —— MMD 允许不同 morph 重名，
+    /// 此时权重写给全部同名项；空数组 = 未绑定）。
+    /// </summary>
+    public int[] MorphIndices = [];
 
     public int[] Frames = [];
     public float[] Weights = [];
 
     public bool IsEmpty => Frames.Length == 0;
+
+    /// <summary>是否已绑定到模型上至少一个 morph。</summary>
+    public bool IsBound => MorphIndices.Length > 0;
 
     /// <summary>采样权重（帧号的纯函数）；帧号早于首键 / 晚于末键时钳制到端键。</summary>
     public float SampleWeight(double frame)
@@ -226,10 +232,10 @@ public sealed class MmdMorphTrack
         return Weights[a] + (Weights[b] - Weights[a]) * g;
     }
 
-    internal MmdMorphTrack WithMorphIndex(int morphIndex) => new()
+    internal MmdMorphTrack WithMorphIndices(int[] morphIndices) => new()
     {
         Name = Name,
-        MorphIndex = morphIndex,
+        MorphIndices = morphIndices,
         Frames = Frames,
         Weights = Weights,
     };
@@ -321,8 +327,8 @@ public sealed class MmdAnimation
         var morphs = new List<MmdMorphTrack>(MorphTracks.Length);
         foreach (var track in MorphTracks)
         {
-            int index = FindMorph(model, track.Name);
-            if (index >= 0) morphs.Add(track.WithMorphIndex(index));
+            var indices = FindMorphIndices(model, track.Name);
+            if (indices.Length > 0) morphs.Add(track.WithMorphIndices(indices));
         }
 
         return new MmdAnimation
@@ -341,10 +347,11 @@ public sealed class MmdAnimation
     /// <summary>
     /// 把 <paramref name="frame"/> 处的姿态写入模型（骨骼）。
     ///
-    /// 纯函数语义：<b>先整体复位到绑定姿势</b>（局部旋转归单位、局部平移归 <see cref="SkeletalModel.LocalPositions"/>），
-    /// 再逐轨道写入，不依赖也不保留上一帧的任何状态 —— 因此「连续播放到帧 N」与「直接 seek 到帧 N」结果完全一致。
-    /// 只改局部 T/R，不重算世界矩阵（由调用方的 <c>PrepareFrame</c> 负责）。
-    /// morph 权重本步骤不应用（Step 5）。
+    /// 纯函数语义：<b>先整体复位到绑定姿势</b>（局部旋转归单位、局部平移归 <see cref="SkeletalModel.LocalPositions"/>、
+    /// <see cref="SkeletalModel.MorphRawWeights"/> 归零），再逐轨道写入，不依赖也不保留上一帧的任何状态 ——
+    /// 因此「连续播放到帧 N」与「直接 seek 到帧 N」结果完全一致。
+    /// 只改局部 T/R 与原始 morph 权重，不重算世界矩阵（由调用方的 <c>PrepareFrame</c> 负责）；
+    /// Group 传播与骨 morph 由 <see cref="MmdMorphEvaluator.Evaluate"/> 在采样之后完成。
     /// </summary>
     public void Sample(SkeletalModel model, double frame)
     {
@@ -357,6 +364,10 @@ public sealed class MmdAnimation
         for (int i = 0; i < translations.Length; i++)
             translations[i] = bindPositions[i];
 
+        var morphWeights = model.MorphRawWeights;
+        for (int i = 0; i < morphWeights.Length; i++)
+            morphWeights[i] = 0f;
+
         foreach (var track in BoneTracks)
         {
             int index = track.BoneIndex;
@@ -367,15 +378,34 @@ public sealed class MmdAnimation
             // VMD 平移是相对绑定姿势的父空间偏移
             translations[index] = bindPositions[index] + offset;
         }
+
+        foreach (var track in MorphTracks)
+        {
+            float weight = track.SampleWeight(frame);
+            var indices = track.MorphIndices;
+            for (int k = 0; k < indices.Length; k++)
+            {
+                int index = indices[k];
+                if ((uint)index >= (uint)morphWeights.Length) continue;
+                morphWeights[index] = weight;
+            }
+        }
     }
 
-    private static int FindMorph(SkeletalModel model, string name)
+    /// <summary>
+    /// 按名字找出<b>全部</b>同名 morph 索引（MMD 允许重名，权重必须写给每一个）。
+    /// 找不到时返回空数组。
+    /// </summary>
+    private static int[] FindMorphIndices(SkeletalModel model, string name)
     {
         var names = model.MorphNames;
+        List<int>? hits = null;
         for (int i = 0; i < names.Length; i++)
-            if (string.Equals(names[i], name, StringComparison.Ordinal))
-                return i;
-        return -1;
+        {
+            if (!string.Equals(names[i], name, StringComparison.Ordinal)) continue;
+            (hits ??= []).Add(i);
+        }
+        return hits is null ? [] : hits.ToArray();
     }
 
     // ---------------------------------------------------------------- 轨道构建

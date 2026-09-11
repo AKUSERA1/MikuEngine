@@ -409,7 +409,34 @@ public class MmdAnimationTests
         Assert.Single(bound.MorphTracks);
         Assert.Equal(1, Array.Find(bound.BoneTracks, t => t.Name == "センター")!.BoneIndex);
         Assert.Equal(0, Array.Find(bound.BoneTracks, t => t.Name == "腕")!.BoneIndex);
-        Assert.Equal(0, bound.MorphTracks[0].MorphIndex);
+        Assert.Equal(new[] { 0 }, bound.MorphTracks[0].MorphIndices);
+    }
+
+    [Fact]
+    public void Bind_WritesAllDuplicateMorphNames()
+    {
+        // MMD 允许不同 morph 重名 —— 权重必须写给全部同名项（此前只取第一个）。
+        var model = new SkeletalModel
+        {
+            BoneNames = [],
+            MorphNames = ["まばたき", "にこり", "まばたき"],
+            MorphRawWeights = new float[3],
+            MorphWeights = new float[3],
+        };
+
+        var motion = Motion(
+            Array.Empty<VmdBoneKey>(),
+            new[] { Morph("まばたき", 0, 1f) });
+
+        var bound = MmdAnimation.Bind(motion, model);
+
+        var track = Assert.Single(bound.MorphTracks);
+        Assert.Equal(new[] { 0, 2 }, track.MorphIndices);
+
+        bound.Sample(model, 0);
+        Assert.Equal(1f, model.MorphRawWeights[0]);
+        Assert.Equal(0f, model.MorphRawWeights[1]);
+        Assert.Equal(1f, model.MorphRawWeights[2]);
     }
 
     // ================================================================ 真实 Motion.vmd

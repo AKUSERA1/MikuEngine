@@ -89,6 +89,52 @@ public sealed class SkeletalModel
     /// <summary>表情（morph）名称表，供动画轨道按名字绑定。</summary>
     public string[] MorphNames = Array.Empty<string>();
 
+    // ── 表情（morph） ───────────────────────────────────────────────────
+    //
+    // 数据布局原则：**全程稀疏**。PMX 的顶点/UV/骨 morph 源数据本身就是
+    // 「受影响索引 + 偏移」的稀疏形式，这里只做重排与越界过滤，绝不展开成
+    // 「顶点数 × morph 数」的稠密数组（babylon-mmd 的做法，20 万顶点 / 400 morph ≈ 960 MB）。
+    //
+    // 运行时唯一每帧变化的 morph 状态是 MorphWeights；顶点/UV 偏移由渲染层按活跃
+    // morph 稀疏累加，材质 morph 由 MmdMorphEvaluator.ResolveMaterial 逐段混合。
+
+    /// <summary>每条 morph 的类型（<see cref="PmxMorphType"/> 原样），供求值分发与诊断。</summary>
+    public byte[] MorphKinds = Array.Empty<byte>();
+
+    /// <summary>
+    /// 动画写入的<b>原始</b>权重（仅 VMD 轨道值），长度 = <see cref="MorphNames"/>.Length。
+    /// 由 <c>MmdAnimation.Sample</c> 先整体清零再写入。
+    /// </summary>
+    public float[] MorphRawWeights = Array.Empty<float>();
+
+    /// <summary>
+    /// <b>有效</b>权重（Group 传播之后的解算结果），长度同 <see cref="MorphNames"/>。
+    /// 由 <c>MmdMorphEvaluator.Evaluate</c> 从 <see cref="MorphRawWeights"/> 重算，
+    /// 渲染层只读这一份。因为每次都整体重算，<c>Evaluate</c> 是幂等的。
+    /// </summary>
+    public float[] MorphWeights = Array.Empty<float>();
+
+    /// <summary>顶点 morph 稀疏表（只含类型 1）。</summary>
+    public VertexMorphSparse[] VertexMorphs = Array.Empty<VertexMorphSparse>();
+
+    /// <summary>主 UV morph 稀疏表（只含类型 3；附加 UV1~4 不支持）。</summary>
+    public UvMorphSparse[] UvMorphs = Array.Empty<UvMorphSparse>();
+
+    /// <summary>骨 morph 稀疏表（只含类型 2）。</summary>
+    public BoneMorphSparse[] BoneMorphs = Array.Empty<BoneMorphSparse>();
+
+    /// <summary>材质 morph 元素表，按 morph 索引存放；非材质 morph 为 null。</summary>
+    public PmxMaterialMorphElement[]?[] MaterialMorphs = Array.Empty<PmxMaterialMorphElement[]?>();
+
+    /// <summary>Group morph 引用表，按 morph 索引存放；非 Group morph 为 null。</summary>
+    public GroupMorphSparse?[] GroupMorphs = Array.Empty<GroupMorphSparse?>();
+
+    /// <summary>
+    /// Group 求值序：保证「引用者先于被引用者」。引用图里的环（自引用 / 互引用）
+    /// 已被丢弃对应边，因此本序是良定义的拓扑序，可安全地一次遍历完成级联传播。
+    /// </summary>
+    public int[] GroupOrder = Array.Empty<int>();
+
     /// <summary>保证"父先于子"的遍历顺序，供 UpdateWorldMatrices 使用。</summary>
     public int[] DeformOrder = Array.Empty<int>();
 
@@ -178,6 +224,15 @@ public sealed class SkeletalModel
         for (int i = 0; i < LocalTranslations.Length; i++)
             LocalTranslations[i] = LocalPositions[i];
         UpdateWorldMatrices();
+    }
+
+    /// <summary>把表情权重归零（关闭表情驱动时用，保证不再残留上一层表情）。</summary>
+    public void ResetMorphWeights()
+    {
+        for (int i = 0; i < MorphRawWeights.Length; i++)
+            MorphRawWeights[i] = 0f;
+        for (int i = 0; i < MorphWeights.Length; i++)
+            MorphWeights[i] = 0f;
     }
 
     /// <summary>

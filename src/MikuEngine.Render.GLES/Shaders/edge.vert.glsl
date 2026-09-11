@@ -36,7 +36,13 @@ layout(std430, binding = 1) buffer SkinMatricesBlock {
     mat4 uSkinMatrices[];
 };
 
+// 顶点 morph 偏移（binding 2）—— 必须与主渲染用同一份偏移，否则轮廓线会与本体错位。
+layout(std430, binding = 2) buffer MorphBlock {
+    vec4 uMorphOffsets[];
+};
+
 uniform float uSkinMatBase;
+uniform float uMorphEnabled;       // 0 = 模型无顶点 morph
 uniform vec4  uMaterialEdgeColor;
 uniform float uMaterialEdgeSize;   // PMX 材质的 EdgeSize
 
@@ -56,6 +62,9 @@ void main()
     uint  j[4] = uint[4](aJoints.x, aJoints.y, aJoints.z, aJoints.w);
     float wsum = w[0] + w[1] + w[2] + w[3];
 
+    // 顶点 morph：与主 VS 完全一致（模型空间偏移，蒙皮之前）
+    vec3 morphPos = aPosition + (uMorphEnabled > 0.5 ? uMorphOffsets[gl_VertexID].xyz : vec3(0.0));
+
     vec4 sp = vec4(0.0);
     vec3 sn = vec3(0.0);
     if (wsum > 1e-5)
@@ -64,14 +73,14 @@ void main()
         {
             float wk = w[k] / wsum;
             mat4 m = uSkinMatrices[base + int(j[k])];
-            sp += m * vec4(aPosition, 1.0) * wk;
+            sp += m * vec4(morphPos, 1.0) * wk;
             sn += mat3(m) * aNormal * wk;
         }
     }
     else
     {
         mat4 m = uSkinMatrices[base];
-        sp = m * vec4(aPosition, 1.0);
+        sp = m * vec4(morphPos, 1.0);
         sn = mat3(m) * aNormal;
     }
 

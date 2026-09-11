@@ -6,9 +6,10 @@ namespace MikuEngine.Core.Models;
 /// <summary>
 /// PmxModel（PMX 原始数据）→ SkeletalModel（运行时模型）。
 ///
-/// 当前只做静态预览所需的部分：
-///   交错 VBO / 统一索引缓冲 / 逆绑定矩阵 / 变形顺序 / 材质段分类。
-/// Morph、SoftBody、SDEF 真实现留到后续。
+/// 当前只做静态预览与动画所需的部分：
+///   交错 VBO / 统一索引缓冲 / 逆绑定矩阵 / 变形顺序 / 材质段分类 /
+///   表情（morph）稀疏表与 Group 求值序。
+/// SoftBody、SDEF 真实现留到后续。
 /// </summary>
 public static class SkeletalModelConverter
 {
@@ -18,13 +19,13 @@ public static class SkeletalModelConverter
         {
             Materials = pmx.Materials,
             Textures = pmx.Textures,
-            MorphNames = pmx.Morphs.Select(m => m.Name).ToArray(),
         };
 
         BuildBones(pmx, model);
         BuildVertices(pmx, model);
         BuildIndices(pmx, model);
         BuildSegments(pmx, model);
+        BuildMorphs(pmx, model);
 
         model.ResetPose();
         return model;
@@ -336,6 +337,206 @@ public static class SkeletalModelConverter
         }
 
         model.Segments = segs;
+    }
+
+    // ---------------------------------------------------------------- 表情（morph）
+
+    /// <summary>
+    /// 建表情数据表。**全程稀疏**：只重排 PMX 的「受影响索引 + 偏移」，绝不展开成
+    /// 「顶点数 × morph 数」的稠密数组（babylon-mmd 的做法，20 万顶点 / 400 morph ≈ 960 MB）。
+    ///
+    /// 支持：Group(0) / Vertex(1) / Bone(2) / UV(3) / Material(8)。
+    ///
+    /// <b>不支持</b>（数据仍留在 <see cref="PmxMorph"/> 里，这里不建运行时表、不参与求值）：
+    ///   * Flip(9) / Impulse(10) —— PMX 2.1 追加项，实际模型里几乎不存在；Impulse 还需刚体物理。
+    ///   * 附加 UV1~4(4~7) —— 本引擎顶点格式没有附加 UV 通道。
+    /// 详见 docs/2026-09-11-anim-morph-plan.md §0.2。
+    /// </summary>
+    private static void BuildMorphs(PmxModel pmx, SkeletalModel model)
+    {
+        var morphs = pmx.Morphs;
+        int n = morphs.Length;
+
+        model.MorphNames = new string[n];
+        model.MorphKinds = new byte[n];
+        model.MorphRawWeights = new float[n];
+        model.MorphWeights = new float[n];
+        model.MaterialMorphs = new PmxMaterialMorphElement[]?[n];
+
+        var groups = new GroupMorphSparse?[n];
+        var vertexList = new List<VertexMorphSparse>();
+        var uvList = new List<UvMorphSparse>();
+        var boneList = new List<BoneMorphSparse>();
+
+        for (int i = 0; i < n; i++)
+        {
+            var m = morphs[i];
+            model.MorphNames[i] = m.Name;
+            model.MorphKinds[i] = (byte)m.Type;
+
+            switch (m.Type)
+            {
+                case PmxMorphType.Vertex:
+                {
+                    if (m.Indices is not { } vIdx || m.Positions is not { } vPos) break;
+
+                    var indices = new List<int>(vIdx.Length);
+                    var offsets = new List<Vector3>(vIdx.Length);
+                    for (int k = 0; k < vIdx.Length; k++)
+                    {
+                        int v = vIdx[k];
+                        int s = k * 3;
+                        // 脏索引 / 截断数组：加载期过滤一次，运行时零判断
+                        if ((uint)v >= (uint)model.VertexCount || s + 2 >= vPos.Length) continue;
+                        indices.Add(v);
+                        offsets.Add(new Vector3(vPos[s], vPos[s + 1], vPos[s + 2]));
+                    }
+                    if (indices.Count > 0)
+                        vertexList.Add(new VertexMorphSparse
+                        {
+                            MorphIndex = i,
+                            VertexIndices = indices.ToArray(),
+                            Offsets = offsets.ToArray(),
+                        });
+                    break;
+                }
+
+                case PmxMorphType.Uv:
+                {
+                    if (m.Indices is not { } uIdx || m.Offsets is not { } uOff) break;
+
+                    var indices = new List<int>(uIdx.Length);
+                    var offsets = new List<Vector2>(uIdx.Length);
+                    for (int k = 0; k < uIdx.Length; k++)
+                    {
+                        int v = uIdx[k];
+                        int s = k * 4;
+                        if ((uint)v >= (uint)model.VertexCount || s + 3 >= uOff.Length) continue;
+                        indices.Add(v);
+                        // 只用 xy。本引擎上传的是文件原序 UV 且采样已与 PmxEditor 对齐，
+                        // 因此不做 V 翻转，偏移直接相加（见 anim-morph-plan §5.2）。
+                        offsets.Add(new Vector2(uOff[s], uOff[s + 1]));
+                    }
+                    if (indices.Count > 0)
+                        uvList.Add(new UvMorphSparse
+                        {
+                            MorphIndex = i,
+                            VertexIndices = indices.ToArray(),
+                            Offsets = offsets.ToArray(),
+                        });
+                    break;
+                }
+
+                case PmxMorphType.Bone:
+                {
+                    if (m.Indices is not { } bIdx || m.Positions is not { } bPos || m.Rotations is not { } bRot) break;
+
+                    var indices = new List<int>(bIdx.Length);
+                    var translations = new List<Vector3>(bIdx.Length);
+                    var rotations = new List<Quaternion>(bIdx.Length);
+                    for (int k = 0; k < bIdx.Length; k++)
+                    {
+                        int b = bIdx[k];
+                        int s3 = k * 3, s4 = k * 4;
+                        if ((uint)b >= (uint)model.BoneCount) continue;
+                        if (s3 + 2 >= bPos.Length || s4 + 3 >= bRot.Length) break;
+                        indices.Add(b);
+                        translations.Add(new Vector3(bPos[s3], bPos[s3 + 1], bPos[s3 + 2]));
+                        rotations.Add(new Quaternion(bRot[s4], bRot[s4 + 1], bRot[s4 + 2], bRot[s4 + 3]));
+                    }
+                    if (indices.Count > 0)
+                        boneList.Add(new BoneMorphSparse
+                        {
+                            MorphIndex = i,
+                            BoneIndices = indices.ToArray(),
+                            Translations = translations.ToArray(),
+                            Rotations = rotations.ToArray(),
+                        });
+                    break;
+                }
+
+                case PmxMorphType.Material:
+                    model.MaterialMorphs[i] = m.MaterialElements;
+                    break;
+
+                case PmxMorphType.Group:
+                {
+                    if (m.Indices is not { } gIdx || m.Ratios is not { } gRatio) break;
+
+                    var child = new List<int>(gIdx.Length);
+                    var ratio = new List<float>(gIdx.Length);
+                    for (int k = 0; k < gIdx.Length; k++)
+                    {
+                        int c = gIdx[k];
+                        if ((uint)c >= (uint)n || c == i || k >= gRatio.Length) continue;  // 越界 / 自引用丢弃
+                        child.Add(c);
+                        ratio.Add(gRatio[k]);
+                    }
+                    groups[i] = new GroupMorphSparse
+                    {
+                        MorphIndex = i,
+                        ChildIndices = child.ToArray(),
+                        Ratios = ratio.ToArray(),
+                    };
+                    break;
+                }
+
+                // 其它类型（Flip / Impulse / 附加 UV1~4）本步不支持：不建表、不参与求值。
+            }
+        }
+
+        model.VertexMorphs = vertexList.ToArray();
+        model.UvMorphs = uvList.ToArray();
+        model.BoneMorphs = boneList.ToArray();
+        model.GroupMorphs = groups;
+        model.GroupOrder = BuildGroupOrder(groups);
+    }
+
+    /// <summary>
+    /// Group 求值序。边 <c>u → c</c> 表示「u 引用 c」，因此要求 <b>u 先于 c</b>：
+    /// DFS 后序天然给出「被引用者在前」，整体取反即得所需序。
+    ///
+    /// 环保护：只在 <c>state[c] == 0</c> 时入栈，因此自引用 / 互引用都不会死循环，
+    /// 环上的边被静默丢弃（与 <see cref="BuildEvaluationOrder"/> 同风格）。
+    /// 非 group 的子项不入序（它们不需要传播）。
+    /// </summary>
+    private static int[] BuildGroupOrder(GroupMorphSparse?[] groups)
+    {
+        int n = groups.Length;
+        var state = new byte[n];                 // 0=未访问, 1=在栈上, 2=已完成
+        var post = new List<int>(n);
+        var stack = new Stack<(int Node, bool Post)>(n * 2);
+
+        for (int start = 0; start < n; start++)
+        {
+            if (groups[start] is null || state[start] != 0) continue;
+            stack.Push((start, false));
+
+            while (stack.Count > 0)
+            {
+                var (u, isPost) = stack.Pop();
+                if (isPost)
+                {
+                    state[u] = 2;
+                    post.Add(u);
+                    continue;
+                }
+                if (state[u] != 0) continue;
+                state[u] = 1;
+                stack.Push((u, true));
+
+                var children = groups[u]!.Value.ChildIndices;
+                for (int k = 0; k < children.Length; k++)
+                {
+                    int c = children[k];
+                    if (groups[c] is null) continue;      // 非 group 子项不参与排序
+                    if (state[c] == 0) stack.Push((c, false));
+                }
+            }
+        }
+
+        post.Reverse();
+        return post.ToArray();
     }
 
     /// <summary>

@@ -395,6 +395,134 @@ public class SkeletalModelConverterTests
                AlmostEqual(a.M43, b.M43, tol) && AlmostEqual(a.M44, b.M44, tol);
     }
 
+    // ------------------------------------------------------------------ 表情（morph）
+    //
+    // 用 TestModels 里的完整模型（顶点 / 骨 / UV / 材质 morph 混合）校验转换器建的稀疏表。
+    // 判据核心是「不稠密化」：受影响顶点数远小于「顶点数 × morph 数」。
+
+    private const string AluRelative = "tests/MikuEngine.Core.Tests/TestModels/Alu_SummerAl_v1.5.pmx";
+
+    private static PmxModel LoadPmx() => PmxParser.Parse(File.ReadAllBytes(FindUp(AluRelative)));
+
+    [Fact]
+    public void VertexMorphs_AreSparseAndMatchPmx()
+    {
+        var pmx = LoadPmx();
+        var model = SkeletalModelConverter.Convert(pmx);
+
+        var byIndex = model.VertexMorphs.ToDictionary(m => m.MorphIndex);
+        int checkedMorphs = 0;
+
+        for (int i = 0; i < pmx.Morphs.Length; i++)
+        {
+            var src = pmx.Morphs[i];
+            if (src.Type != PmxMorphType.Vertex) continue;
+
+            var indices = src.Indices!;
+            var positions = src.Positions!;
+
+            int valid = 0;
+            for (int k = 0; k < indices.Length; k++)
+                if ((uint)indices[k] < (uint)model.VertexCount) valid++;
+
+            if (!byIndex.TryGetValue(i, out var sparse))
+            {
+                Assert.Equal(0, valid);   // 没有运行时项 ⇒ 源数据里没有任何合法索引
+                continue;
+            }
+
+            Assert.Equal(valid, sparse.VertexIndices.Length);
+
+            // 逐项比对（保持源顺序；越界项在加载期已被过滤）
+            int w = 0;
+            for (int k = 0; k < indices.Length; k++)
+            {
+                int v = indices[k];
+                if ((uint)v >= (uint)model.VertexCount) continue;
+
+                Assert.Equal(v, sparse.VertexIndices[w]);
+                Assert.Equal(positions[k * 3 + 0], sparse.Offsets[w].X, 1e-6f);
+                Assert.Equal(positions[k * 3 + 1], sparse.Offsets[w].Y, 1e-6f);
+                Assert.Equal(positions[k * 3 + 2], sparse.Offsets[w].Z, 1e-6f);
+                w++;
+            }
+            checkedMorphs++;
+        }
+
+        Assert.True(checkedMorphs > 0, "测试模型应含顶点 morph");
+    }
+
+    [Fact]
+    public void MorphTables_AreSparse_NotDensified()
+    {
+        var model = SkeletalModelConverter.Convert(LoadPmx());
+
+        Assert.True(model.VertexMorphs.Length > 0, "测试模型应含顶点 morph");
+
+        long affected = model.VertexMorphs.Sum(m => (long)m.VertexIndices.Length);
+        long dense = (long)model.VertexCount * model.VertexMorphs.Length;
+
+        Assert.True(affected < dense,
+            $"顶点 morph 应是稀疏的：受影响顶点 {affected} 应远小于稠密化后的 {dense}");
+    }
+
+    [Fact]
+    public void MorphKinds_MatchPmx_AndUnsupportedTypesHaveNoTable()
+    {
+        var pmx = LoadPmx();
+        var model = SkeletalModelConverter.Convert(pmx);
+
+        var expected = pmx.Morphs.GroupBy(m => m.Type).ToDictionary(g => g.Key, g => g.Count());
+        var actual = model.MorphKinds.GroupBy(k => (PmxMorphType)k).ToDictionary(g => g.Key, g => g.Count());
+
+        Assert.Equal(expected.Count, actual.Count);
+        foreach (var (type, count) in expected)
+        {
+            Assert.True(actual.TryGetValue(type, out int got), $"运行时表缺少类型 {type}");
+            Assert.Equal(count, got);
+        }
+
+        // 不支持的类型（Flip / Impulse / 附加 UV1~4）不得出现在任何运行时表里
+        for (int i = 0; i < pmx.Morphs.Length; i++)
+        {
+            var type = pmx.Morphs[i].Type;
+            bool supported = type is PmxMorphType.Group or PmxMorphType.Vertex or PmxMorphType.Bone
+                                  or PmxMorphType.Uv or PmxMorphType.Material;
+            if (supported) continue;
+
+            Assert.Null(model.GroupMorphs[i]);
+            Assert.Null(model.MaterialMorphs[i]);
+            Assert.DoesNotContain(model.VertexMorphs, m => m.MorphIndex == i);
+            Assert.DoesNotContain(model.UvMorphs, m => m.MorphIndex == i);
+            Assert.DoesNotContain(model.BoneMorphs, m => m.MorphIndex == i);
+        }
+    }
+
+    [Fact]
+    public void GroupOrder_IsReferencerBeforeReferenced()
+    {
+        var model = SkeletalModelConverter.Convert(LoadPmx());
+
+        int groupCount = model.GroupMorphs.Count(g => g is not null);
+        Assert.Equal(groupCount, model.GroupOrder.Length);
+
+        var position = new int[model.GroupMorphs.Length];
+        Array.Fill(position, -1);
+        for (int i = 0; i < model.GroupOrder.Length; i++)
+            position[model.GroupOrder[i]] = i;
+
+        for (int g = 0; g < model.GroupMorphs.Length; g++)
+        {
+            if (model.GroupMorphs[g] is not { } group) continue;
+            foreach (int child in group.ChildIndices)
+            {
+                if (model.GroupMorphs[child] is null) continue;   // 非组子项不参与排序
+                Assert.True(position[g] >= 0 && position[child] >= 0);
+                Assert.True(position[g] < position[child], $"组 {g} 必须排在被它引用的组 {child} 之前");
+            }
+        }
+    }
+
     private static bool AlmostEqual(float a, float b, float tol) => MathF.Abs(a - b) <= tol;
 }
 
