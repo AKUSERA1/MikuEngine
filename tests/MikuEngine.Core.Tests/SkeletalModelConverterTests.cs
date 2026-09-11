@@ -1,4 +1,5 @@
 using System.Numerics;
+using MikuEngine.Core.Animation;
 using MikuEngine.Core.Models;
 
 namespace MikuEngine.Core.Tests;
@@ -13,16 +14,20 @@ public class SkeletalModelConverterTests
 {
     private const string Relative = "samples/MikuEngine.Demo/Model/Model.pmx";
 
-    private static string FindModel()
+    private static string FindModel() => FindUp(Relative);
+
+    private static string FindMotion() => FindUp("samples/MikuEngine.Demo/Motion/Motion.vmd");
+
+    private static string FindUp(string relative)
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir != null)
         {
-            var candidate = Path.Combine(dir.FullName, Relative.Replace('/', Path.DirectorySeparatorChar));
+            var candidate = Path.Combine(dir.FullName, relative.Replace('/', Path.DirectorySeparatorChar));
             if (File.Exists(candidate)) return candidate;
             dir = dir.Parent;
         }
-        throw new IOException($"未找到 {Relative}，请确认 Demo 资源存在。");
+        throw new IOException($"未找到 {relative}，请确认 Demo 资源存在。");
     }
 
     private static SkeletalModel Load() =>
@@ -50,6 +55,66 @@ public class SkeletalModelConverterTests
     }
 
     // ------------------------------------------------------------------ 完整性
+
+    // Step 3：局部平移字段（动画前提）
+    // 无动画时 LocalTranslations ≡ LocalPositions ⇒ UpdateWorldMatrices 的输出与改造前逐位一致（回归基线）。
+
+    [Fact]
+    public void BindPose_LocalTranslationsMatchLocalPositions()
+    {
+        var m = Load();
+
+        Assert.NotEmpty(m.LocalPositions);
+        Assert.Equal(m.LocalPositions.Length, m.LocalTranslations.Length);
+        Assert.Equal(m.LocalPositions, m.LocalTranslations);
+    }
+
+    [Fact]
+    public void BindPose_WorldMatricesStableAcrossRecompute()
+    {
+        var m = Load();
+        var before = (System.Numerics.Matrix4x4[])m.WorldMatrices.Clone();
+
+        m.UpdateWorldMatrices();
+
+        Assert.Equal(before, m.WorldMatrices);
+    }
+
+    /// <summary>
+    /// 绑定姿势下每根骨的世界位置必须等于 PMX 里的模型空间绝对坐标。
+    ///
+    /// 这是「PMX 绝对坐标 → 局部平移取父骨差值」的回归锁：若误把绝对坐标当局部平移，
+    /// 绑定姿势的 WorldMatrices 会沿链累加（头骨能跑到模型高度的数倍），
+    /// 静态渲染因 Skin ≡ 单位阵而看不出问题，但 FK 动画会绕错误支点旋转（撕裂）。
+    /// </summary>
+    [Fact]
+    public void BindPose_BoneWorldPositions_EqualPmxAbsolutePositions()
+    {
+        var pmx = PmxParser.Parse(File.ReadAllBytes(FindModel()));
+        var m = SkeletalModelConverter.Convert(pmx);
+
+        Assert.Equal(pmx.Bones.Length, m.BoneCount);
+        for (int i = 0; i < pmx.Bones.Length; i++)
+        {
+            var delta = m.WorldMatrices[i].Translation - pmx.Bones[i].Position;
+            Assert.True(delta.Length() < 1e-3f,
+                $"骨 #{i} \"{pmx.Bones[i].Name}\" 绑定世界位置 {m.WorldMatrices[i].Translation} " +
+                $"≠ PMX 绝对坐标 {pmx.Bones[i].Position}");
+        }
+    }
+
+    [Fact]
+    public void ResetPose_RestoresRotations_AndTranslations()
+    {
+        var m = Load();
+        m.LocalRotations[0] = System.Numerics.Quaternion.CreateFromAxisAngle(System.Numerics.Vector3.UnitY, 0.5f);
+        m.LocalTranslations[0] = m.LocalPositions[0] + new System.Numerics.Vector3(3, 4, 5);
+
+        m.ResetPose();
+
+        Assert.Equal(System.Numerics.Quaternion.Identity, m.LocalRotations[0]);
+        Assert.Equal(m.LocalPositions[0], m.LocalTranslations[0]);
+    }
 
     [Fact]
     public void Segments_CoverAllIndicesWithoutOverlap()
@@ -120,6 +185,119 @@ public class SkeletalModelConverterTests
             int p = m.ParentIndices[i];
             if (p < 0) continue;
             Assert.True(rank[p] < rank[i], $"骨骼 {i}(\"{m.BoneNames[i]}\") 先于其父 {p} 被遍历");
+        }
+    }
+
+    /// <summary>
+    /// 付与（append transform）要读源骨<b>已算完的最终局部变换</b>，因此求值顺序也必须满足
+    /// 「付与源先于付与目标」——这一条光靠父边拓扑序是不够的。
+    /// </summary>
+    [Fact]
+    public void DeformOrder_GuaranteesAppendSourceBeforeTarget()
+    {
+        var m = Load();
+        var rank = new int[m.BoneCount];
+        for (int k = 0; k < m.DeformOrder.Length; k++)
+            rank[m.DeformOrder[k]] = k;
+
+        int checkedCount = 0;
+        for (int i = 0; i < m.BoneCount; i++)
+        {
+            int src = m.AppendSources[i];
+            if (src < 0) continue;
+            Assert.True(rank[src] < rank[i],
+                $"骨骼 {i}(\"{m.BoneNames[i]}\") 早于其付与源 {src}(\"{m.BoneNames[src]}\") 被求值");
+            checkedCount++;
+        }
+
+        Assert.True(checkedCount > 0, "该模型应存在付与骨（足D/腰キャンセル/腕捩1..3 等）");
+    }
+
+    // ------------------------------------------------------------------ 付与 / 軸制限
+
+    [Fact]
+    public void AppendTransform_IsParsedFromPmx()
+    {
+        var m = Load();
+
+        // 复制腿：足D ← 足，ratio 1.0，只继承旋转
+        int legD = m.FindBone("左足D");
+        Assert.True(legD >= 0, "模型应存在「左足D」");
+        Assert.Equal(m.FindBone("左足"), m.AppendSources[legD]);
+        Assert.Equal(1f, m.AppendRatios[legD]);
+        Assert.True(m.AppendRotate[legD]);
+        Assert.False(m.AppendMove[legD]);
+
+        // 腰キャンセル：ratio -1（反向抵消腰的旋转）
+        int cancel = m.FindBone("腰キャンセル左");
+        Assert.True(cancel >= 0, "模型应存在「腰キャンセル左」");
+        Assert.Equal(m.FindBone("腰"), m.AppendSources[cancel]);
+        Assert.Equal(-1f, m.AppendRatios[cancel]);
+
+        // 腕捩1..3 按 0.25/0.5/0.75 摊扭转到前臂
+        int twist1 = m.FindBone("左腕捩1");
+        Assert.Equal(m.FindBone("左腕捩"), m.AppendSources[twist1]);
+        Assert.Equal(0.25f, m.AppendRatios[twist1], 5);
+
+        // 无付与的骨必须是 -1（而不是 0 —— 0 是合法的源骨索引）
+        int center = m.FindBone("センター");
+        Assert.Equal(m.FindBone("センター調整"), m.AppendSources[center]);
+        Assert.Equal(-1, m.AppendSources[0]);
+    }
+
+    [Fact]
+    public void AxisLimits_AreNormalizedOrZero()
+    {
+        var m = Load();
+
+        int limited = 0;
+        for (int i = 0; i < m.BoneCount; i++)
+        {
+            var a = m.AxisLimits[i];
+            if (a == Vector3.Zero) continue;
+            limited++;
+            Assert.True(MathF.Abs(a.Length() - 1f) < 1e-5f,
+                $"骨骼 {i}(\"{m.BoneNames[i]}\") 的軸制限轴未归一化：{a}");
+        }
+
+        // 腕捩/手捩 及其「〜調整」镜像骨，共 8 根带軸制限
+        Assert.Equal(8, limited);
+        int twist = m.FindBone("左腕捩");
+        Assert.True(twist >= 0 && m.AxisLimits[twist] != Vector3.Zero, "左腕捩 应带軸制限");
+    }
+
+    /// <summary>
+    /// 该模型用 足D/ひざD/足首D 复制整条腿（每腿约 624 个顶点），这三根复制骨自身没有动画，
+    /// 完全靠付与跟随 足/ひざ/足首。付与没实现时它们会退化成「跟着下半身刚体平移」，
+    /// 腿就完全不动了 —— 这个测试就是那条回归锁。
+    /// </summary>
+    [Fact]
+    public void AppendTransform_MakesDuplicateLegBonesFollowTheRealLeg()
+    {
+        var pmx = PmxParser.Parse(File.ReadAllBytes(FindModel()));
+        var m = SkeletalModelConverter.Convert(pmx);
+        var vmd = VmdParser.Parse(File.ReadAllBytes(FindMotion()));
+
+        MmdAnimation.Bind(vmd, m).Sample(m, 1000);
+        m.UpdateWorldMatrices();
+
+        foreach (var (dup, real) in new[]
+        {
+            ("左足D", "左足"), ("左ひざD", "左ひざ"), ("左足首D", "左足首"),
+            ("右足D", "右足"), ("右ひざD", "右ひざ"), ("右足首D", "右足首"),
+        })
+        {
+            int d = m.FindBone(dup), r = m.FindBone(real);
+            Assert.True(d >= 0 && r >= 0, $"模型应同时存在 {dup} 与 {real}");
+
+            var dupPos = m.WorldMatrices[d].Translation;
+            var realPos = m.WorldMatrices[r].Translation;
+            Assert.True((dupPos - realPos).Length() < 1e-3f,
+                $"{dup} 世界位置 {dupPos} ≠ {real} {realPos}（付与未生效）");
+
+            // 而且必须真的离开了绑定姿势（否则「跟上了」可能只是两边都没动）
+            Assert.True((dupPos - pmx.Bones[d].Position).Length() > 0.5f,
+                $"{dup} 相对绑定姿势没有位移，付与没有真正驱动它");
         }
     }
 
@@ -263,5 +441,150 @@ public class EdgeSegmentTests
         var rabbit = m.Materials[37];
         Assert.True(rabbit.EdgeColor.X > 0.9f && rabbit.EdgeColor.Y > 0.9f, "兔子的轮廓色应为亮黄");
         Assert.Equal(1.2f, rabbit.EdgeSize, 2);
+    }
+}
+
+// ------------------------------------------------------------------ 付与 / 軸制限（合成骨架）
+
+/// <summary>
+/// 付与与軸制限的确定性单元测试：不依赖任何模型文件，手搓最小骨架，
+/// 直接对 <see cref="SkeletalModel.UpdateWorldMatrices"/> 的结果做几何断言。
+/// </summary>
+public class SkeletalPoseTests
+{
+    /// <summary>
+    /// 造一个最小 SkeletalModel：约定父骨下标一定小于子骨下标，因此下标序即合法求值顺序。
+    /// 逆绑定/蒙皮矩阵不参与断言，留单位阵。
+    /// </summary>
+    private static SkeletalModel Synthetic(int[] parents, Vector3[] localPositions)
+    {
+        int n = parents.Length;
+        var identity = new Matrix4x4[n];
+        for (int i = 0; i < n; i++) identity[i] = Matrix4x4.Identity;
+
+        return new SkeletalModel
+        {
+            BoneCount = n,
+            BoneNames = Enumerable.Range(0, n).Select(i => $"bone{i}").ToArray(),
+            ParentIndices = parents,
+            LocalPositions = (Vector3[])localPositions.Clone(),
+            LocalTranslations = (Vector3[])localPositions.Clone(),
+            LocalRotations = Enumerable.Repeat(Quaternion.Identity, n).ToArray(),
+            AppendSources = Enumerable.Repeat(-1, n).ToArray(),
+            AppendRatios = new float[n],
+            AppendRotate = new bool[n],
+            AppendMove = new bool[n],
+            AxisLimits = new Vector3[n],
+            InverseBind = identity,
+            WorldMatrices = new Matrix4x4[n],
+            SkinMatrices = new Matrix4x4[n],
+            DeformOrder = Enumerable.Range(0, n).ToArray(),
+        };
+    }
+
+    private static Quaternion WorldRotation(in SkeletalModel m, int bone) =>
+        Quaternion.CreateFromRotationMatrix(m.WorldMatrices[bone]);
+
+    /// <summary>0=根, 1=付与源, 2=目标（父=0，付与源=1）。</summary>
+    private static SkeletalModel TwoBoneRig()
+    {
+        var m = Synthetic(
+            new[] { -1, 0, 0 },
+            new[] { Vector3.Zero, new Vector3(0, 1, 0), new Vector3(0, 1, 0) });
+        m.AppendSources[2] = 1;
+        return m;
+    }
+
+    [Fact]
+    public void AppendRotation_BlendsTowardSource()
+    {
+        var m = TwoBoneRig();
+        m.AppendRatios[2] = 0.5f;
+        m.AppendRotate[2] = true;
+        m.LocalRotations[1] = Quaternion.CreateFromAxisAngle(Vector3.UnitY, MathF.PI / 2f);
+
+        m.UpdateWorldMatrices();
+
+        var expected = Quaternion.CreateFromAxisAngle(Vector3.UnitY, MathF.PI / 4f);
+        Assert.True(MathF.Abs(Quaternion.Dot(expected, WorldRotation(m, 2))) > 0.99999f,
+            $"比率 0.5 应取源旋转的一半，实际 {WorldRotation(m, 2)}");
+    }
+
+    [Fact]
+    public void AppendRotation_NegativeRatioCancelsSource()
+    {
+        var m = TwoBoneRig();
+        m.AppendRatios[2] = -1f;
+        m.AppendRotate[2] = true;
+        m.LocalRotations[1] = Quaternion.CreateFromAxisAngle(Vector3.UnitY, MathF.PI / 2f);
+
+        m.UpdateWorldMatrices();
+
+        // ratio = -1 ⇒ 取源旋转的共轭（腰キャンセル 用这一手抵消腰的旋转）
+        var expected = Quaternion.CreateFromAxisAngle(Vector3.UnitY, -MathF.PI / 2f);
+        Assert.True(MathF.Abs(Quaternion.Dot(expected, WorldRotation(m, 2))) > 0.99999f);
+    }
+
+    [Fact]
+    public void AppendMove_AddsScaledSourceOffset()
+    {
+        var m = TwoBoneRig();
+        m.AppendRatios[2] = 0.5f;
+        m.AppendMove[2] = true;
+        m.LocalRotations[1] = Quaternion.Identity;
+
+        // 源的动效偏移 = 当前局部平移 − 绑定局部平移
+        m.LocalTranslations[1] = m.LocalPositions[1] + new Vector3(2, 0, 0);
+
+        m.UpdateWorldMatrices();
+
+        // 目标自身绑定世界位置是 (0,1,0)，再加源偏移的一半 (1,0,0)
+        var expected = new Vector3(1, 1, 0);
+        Assert.True((m.WorldMatrices[2].Translation - expected).Length() < 1e-5f,
+            $"实际 {m.WorldMatrices[2].Translation}，期望 {expected}");
+    }
+
+    [Fact]
+    public void AxisLimit_KeepsOnlyTwistAroundAxis()
+    {
+        var m = TwoBoneRig();
+
+        // 绕 Y 扭 0.7 rad + 绕 X 弯 0.4 rad 的混合旋转
+        var mixed = Quaternion.CreateFromAxisAngle(Vector3.UnitY, 0.7f)
+                  * Quaternion.CreateFromAxisAngle(Vector3.UnitX, 0.4f);
+        m.LocalRotations[1] = mixed;                 // 对照组：无限制
+        m.LocalRotations[2] = mixed;                 // 实验组：軸制限 = +Y
+        m.AxisLimits[2] = Vector3.UnitY;
+
+        m.UpdateWorldMatrices();
+
+        // 轴制限后只剩绕 Y 的扭转 ⇒ Y 轴必须是不动轴（只取 3×3 部分，避开平移）
+        var limitedY = Vector3.TransformNormal(Vector3.UnitY, m.WorldMatrices[2]);
+        Assert.True((limitedY - Vector3.UnitY).Length() < 1e-5f,
+            $"軸制限后 Y 轴应保持不动，实际被转到 {limitedY}");
+
+        // 对照组必须真的把 Y 轴转偏了，否则上面的断言可能是「两边都没动」
+        var freeY = Vector3.TransformNormal(Vector3.UnitY, m.WorldMatrices[1]);
+        Assert.True((freeY - Vector3.UnitY).Length() > 1e-2f, "对照组应当把 Y 轴转偏");
+    }
+
+    [Fact]
+    public void UpdateWorldMatrices_IsIdempotent_WithAppendAndAxisLimit()
+    {
+        var m = TwoBoneRig();
+        m.AppendRatios[2] = 0.5f;
+        m.AppendRotate[2] = true;
+        m.AppendMove[2] = true;
+        m.AxisLimits[2] = Vector3.UnitY;
+        m.LocalRotations[1] = Quaternion.CreateFromAxisAngle(Vector3.UnitY, 0.9f);
+        m.LocalTranslations[1] = m.LocalPositions[1] + new Vector3(1, 2, 3);
+
+        m.UpdateWorldMatrices();
+        var first = (Matrix4x4[])m.WorldMatrices.Clone();
+
+        m.UpdateWorldMatrices();
+
+        // 付与结果只写暂存数组、不回写 Local* ⇒ 重复求值不得叠加
+        Assert.Equal(first, m.WorldMatrices);
     }
 }

@@ -2,6 +2,7 @@ using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
 using Silk.NET.Windowing.Glfw;
 using Silk.NET.GLFW;
+using MikuEngine.Core.Animation;
 using MikuEngine.Core.Camera;
 using MikuEngine.Core.Models;
 using MikuEngine.Render.GLES;
@@ -20,6 +21,8 @@ using MikuEngine.Engine;
 //   B    ：给"上半身"骨骼加 30° 旋转 —— 用于确认蒙皮链路真的生效
 //          （静态绑定姿势下蒙皮矩阵是单位阵，不足以证明 skinning 正确）
 //   R    ：重置姿势
+//   动画 (Motion/Motion.vmd 存在时自动加载)：
+//   空格 ：暂停/播放 | ←/→ ：∓1 帧 | ↑/↓ ：帧率 ±6 | Home ：回首帧 | V ：动画驱动开关
 // ─────────────────────────────────────────────────────────────────────────
 
 // --smoke：无人值守自检。隐藏窗口跑 40 帧 → 强制开影模式 1 → 打印中间 RT 统计 → 退出。
@@ -64,6 +67,11 @@ var input = new OrbitInputController(camera, enabled: true);
 // 骨骼测试用（按 B 切换）
 int testBoneIndex = -1;
 bool poseApplied = false;
+
+// VMD 动画（里程碑 A）：Motion/Motion.vmd 存在则自动加载播放
+MmdAnimation? animation = null;
+MmdAnimationPlayer? animPlayer = null;
+bool animationEnabled = true;
 
 window.Load += () =>
 {
@@ -126,6 +134,44 @@ window.Load += () =>
     }
     if (testBoneIndex < 0)
         Console.WriteLine("[Demo] 未找到常用骨骼名，按 B 将旋转 #0 骨骼");
+
+    // ── VMD 动画（里程碑 A）────────────────────────────────────────────
+    // 帧号驱动：渲染帧只推进游标，采样是帧号的纯函数 —— 跳帧 / seek / 暂停都不动采样逻辑。
+    // smoke 模式跳过（自阴影 A/B 校验和比较的是相邻帧画面，动画会让模型动起来污染差异统计）。
+    if (smoke)
+    {
+        Console.WriteLine("[Demo] --smoke：跳过 VMD 动画加载（避免污染自阴影帧间差异）");
+    }
+    else
+    {
+        string? motionPath = FindMotionFile();
+        if (motionPath is null)
+        {
+            Console.WriteLine("[Demo] 未找到 Motion/Motion.vmd，跳过动画");
+        }
+        else
+        {
+            try
+            {
+                var vmd = VmdParser.Parse(File.ReadAllBytes(motionPath));
+                var expanded = MmdAnimation.FromVmd(vmd);
+                var bound = expanded.Bind(m);
+                animPlayer = new MmdAnimationPlayer();
+                animPlayer.Configure(bound.StartFrame, bound.EndFrame);
+                animation = bound;
+                Console.WriteLine($"[Demo] 动画：{Path.GetFileName(motionPath)} | VMD 模型名 \"{vmd.ModelName}\" | " +
+                                  $"帧 {bound.StartFrame:F0}..{bound.EndFrame:F0} | " +
+                                  $"骨轨道 {bound.BoneTracks.Length}/{expanded.BoneTracks.Length} " +
+                                  $"morph 轨道 {bound.MorphTracks.Length}/{expanded.MorphTracks.Length}");
+                if (bound.BoneTracks.Length == 0)
+                    Console.WriteLine("[Demo]   ⚠ 该模型没有能与 VMD 匹配的骨骼，动画不会有可见效果");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Demo] 动画加载失败：{ex.Message}");
+            }
+        }
+    }
 
     // ── 输入：平台层只做"原生事件 → 控制器方法"转发 ──────────────────────
     unsafe
@@ -191,6 +237,32 @@ window.Load += () =>
                 target.Model.ResetPose();
                 Console.WriteLine("[Demo] 姿势已重置为绑定姿势");
             }
+            else if (animPlayer != null && key == Keys.Space)
+            {
+                animPlayer.Paused = !animPlayer.Paused;
+                Console.WriteLine($"[Demo] 动画：{(animPlayer.Paused ? "暂停" : "播放")}（帧 {animPlayer.CurrentFrame:F1}）");
+            }
+            else if (animPlayer != null && (key == Keys.Left || key == Keys.Right))
+            {
+                animPlayer.Step(key == Keys.Left ? -1 : 1);
+                Console.WriteLine($"[Demo] 动画帧：{animPlayer.CurrentFrame:F1}");
+            }
+            else if (animPlayer != null && (key == Keys.Up || key == Keys.Down))
+            {
+                animPlayer.PlaybackFps = MathF.Max(1f, animPlayer.PlaybackFps + (key == Keys.Up ? 6f : -6f));
+                Console.WriteLine($"[Demo] 动画帧率：{animPlayer.PlaybackFps:F0} fps");
+            }
+            else if (animPlayer != null && key == Keys.Home)
+            {
+                animPlayer.Seek(animPlayer.StartFrame);
+                Console.WriteLine($"[Demo] 动画帧：{animPlayer.CurrentFrame:F1}（首帧）");
+            }
+            else if (key == Keys.V)
+            {
+                animationEnabled = !animationEnabled;
+                if (!animationEnabled) target.Model.ResetPose();
+                Console.WriteLine($"[Demo] 动画驱动：{(animationEnabled ? "开" : "关（B/R 静态姿势测试可用）")}");
+            }
             else if (key == Keys.Z)
             {
                 if (debugView is null) return;
@@ -223,6 +295,7 @@ window.Load += () =>
     }
 
     Console.WriteLine("[Demo] 鼠标: 左键=旋转 | 右键=平移 | 滚轮=缩放 | B=弯曲测试 | E=轮廓线 | 1/2/0=自阴影 | S=影风格 | Z=中间RT预览 | R=重置");
+    Console.WriteLine("[Demo] 动画: 空格=暂停 | ←/→=∓1帧 | ↑/↓=帧率±6 | Home=首帧 | V=动画驱动开关");
 
     if (smoke)
     {
@@ -265,6 +338,13 @@ window.Render += dt =>
     if (model != null)
     {
         frame.LightViewProj = shadow?.LightViewProj ?? System.Numerics.Matrix4x4.Identity;
+        // 里程碑 A：先推进动画帧号 → 采样写入局部 T/R（纯函数，先整体复位到绑定姿势）→
+        //   再由 PrepareFrame 重算世界/蒙皮矩阵并上传。影图 pass 与主渲染读同一份本帧姿态。
+        if (animation != null && animPlayer != null && animationEnabled)
+        {
+            animPlayer.Advance(dt);
+            animation.Sample(model.Model, animPlayer.CurrentFrame);
+        }
         // 阶段 0：帧首统一上传（重算蒙皮矩阵 + UBO + 蒙皮 SSBO），
         // 影图 pass 与主渲染都读同一份、且是本帧的最新值（修复了上一帧滞后的坑）。
         model.PrepareFrame(in frame);
@@ -481,6 +561,22 @@ static string? FindDefaultModel()
     }
 
     // 兜底：当前工作目录
+    string fromCwd = Path.Combine(Directory.GetCurrentDirectory(), Relative.Replace('/', Path.DirectorySeparatorChar));
+    return File.Exists(fromCwd) ? fromCwd : null;
+}
+
+static string? FindMotionFile()
+{
+    const string Relative = "samples/MikuEngine.Demo/Motion/Motion.vmd";
+
+    var dir = new DirectoryInfo(AppContext.BaseDirectory);
+    while (dir is not null)
+    {
+        string candidate = Path.Combine(dir.FullName, Relative.Replace('/', Path.DirectorySeparatorChar));
+        if (File.Exists(candidate)) return candidate;
+        dir = dir.Parent;
+    }
+
     string fromCwd = Path.Combine(Directory.GetCurrentDirectory(), Relative.Replace('/', Path.DirectorySeparatorChar));
     return File.Exists(fromCwd) ? fromCwd : null;
 }

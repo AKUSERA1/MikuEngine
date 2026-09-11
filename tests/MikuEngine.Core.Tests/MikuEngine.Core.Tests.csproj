@@ -29,4 +29,9 @@
     <Content Include="TestModels\**\*.*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- VMD golden 基准数据（由 TestData/gen_vmd_golden.mjs 用 babylon-mmd 解析器生成） -->
+  <ItemGroup>
+    <Content Include="TestData\Motion.vmd.golden.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

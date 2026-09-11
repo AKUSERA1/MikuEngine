@@ -86,16 +86,62 @@ public sealed class SkeletalModel
     public int BoneCount;
     public string[] BoneNames = Array.Empty<string>();
 
+    /// <summary>表情（morph）名称表，供动画轨道按名字绑定。</summary>
+    public string[] MorphNames = Array.Empty<string>();
+
     /// <summary>保证"父先于子"的遍历顺序，供 UpdateWorldMatrices 使用。</summary>
     public int[] DeformOrder = Array.Empty<int>();
 
     public int[] ParentIndices = Array.Empty<int>();
 
-    /// <summary>绑定姿势下的局部平移（= PmxBone.Position，相对父骨）。</summary>
+    /// <summary>
+    /// 绑定姿势下的局部平移（<b>相对父骨</b>，父空间）。由 PMX 的模型空间绝对坐标差分而来
+    /// （<c>Bone.Position - parent.Bone.Position</c>）。只读基准值。
+    /// </summary>
     public Vector3[] LocalPositions = Array.Empty<Vector3>();
+
+    /// <summary>
+    /// 当前局部平移（父空间），初始 = <see cref="LocalPositions"/>。
+    /// 动画（VMD 位移轨道）写入此数组，绑定值本身不被改动。
+    /// </summary>
+    public Vector3[] LocalTranslations = Array.Empty<Vector3>();
 
     /// <summary>当前局部旋转，初始为单位四元数（即绑定姿势）。</summary>
     public Quaternion[] LocalRotations = Array.Empty<Quaternion>();
+
+    // ── 付与（append transform）与軸制限 ────────────────────────────────
+    //
+    // 付与是 MMD 的「父约束」：目标骨在自身动画之外，额外继承源骨的一部分变换。
+    // 本模型的典型用法：
+    //   * 足D/ひざD/足首D（每腿 624 个顶点）付与自 足/ひざ/足首  —— 复制腿，让它不随腰弯曲
+    //   * 腰キャンセル左/右 付与自 腰（ratio = -1）—— 抵消腰的旋转
+    //   * 左目/左目先 付与自 両目/左目（ratio 0.8 / -0.7）—— 眼球跟随
+    //   * 腕捩1..3 付与自 腕捩（ratio 0.25/0.5/0.75）—— 把扭转按比例摊到前臂
+    //   * 大量「〜調整」骨：源是编辑器用的静默骨架，ratio 1.0，实际等价于无操作
+
+    /// <summary>付与源骨索引，-1 = 无付与。</summary>
+    public int[] AppendSources = Array.Empty<int>();
+
+    /// <summary>付与比率（PMX 允许负值，-1 = 反向抵消）。已钳制到 [-1, 1]。</summary>
+    public float[] AppendRatios = Array.Empty<float>();
+
+    /// <summary>是否继承旋转（PMX 骨标志 bit8 / 0x0100）。</summary>
+    public bool[] AppendRotate = Array.Empty<bool>();
+
+    /// <summary>是否继承平移（PMX 骨标志 bit9 / 0x0200）。</summary>
+    public bool[] AppendMove = Array.Empty<bool>();
+
+    // 边界：PMX 骨标志 bit7（LocalAppendTransform）表示「取付与亲的世界变换」而非默认的
+    // 「取付与亲的局部变换」。本模型没有任何骨置位该标志，因此该分支未实现 ——
+    // 与 babylon-mmd AppendTransformSolver 的 isLocal 分支等价，日后遇到置位模型再补。
+
+    /// <summary>軸制限轴（<b>已归一化</b>；<see cref="Vector3.Zero"/> = 无限制）。带限制的骨只能绕该轴旋转。</summary>
+    public Vector3[] AxisLimits = Array.Empty<Vector3>();
+
+    // 付与求值需要「源骨的最终局部变换」，而已完成骨的最终值不能再覆盖 Local*（否则重复调用
+    // UpdateWorldMatrices 会二次付与）。因此用独立暂存数组，保证本方法幂等。
+    private Quaternion[] _finalRotations = Array.Empty<Quaternion>();
+    private Vector3[] _finalTranslations = Array.Empty<Vector3>();
 
     public Matrix4x4[] InverseBind = Array.Empty<Matrix4x4>();
     public Matrix4x4[] WorldMatrices = Array.Empty<Matrix4x4>();
@@ -129,27 +175,97 @@ public sealed class SkeletalModel
     {
         for (int i = 0; i < LocalRotations.Length; i++)
             LocalRotations[i] = Quaternion.Identity;
+        for (int i = 0; i < LocalTranslations.Length; i++)
+            LocalTranslations[i] = LocalPositions[i];
         UpdateWorldMatrices();
     }
 
     /// <summary>
-    /// 由当前局部 T/R 重算世界矩阵与蒙皮矩阵。按 <see cref="DeformOrder"/> 遍历保证父先于子。
+    /// 由当前局部 T/R 重算世界矩阵与蒙皮矩阵。按 <see cref="DeformOrder"/> 遍历保证
+    /// 「父先于子」且「付与源先于付与目标」。本方法<b>幂等</b>：付与/軸制限的中间结果只写暂存数组，
+    /// 不回写 <see cref="LocalRotations"/>/<see cref="LocalTranslations"/>。
+    ///
+    /// 乘序：System.Numerics 是<b>行主序 row-vector</b> 约定（<c>Vector3.Transform(v, m)</c> 等价
+    /// <c>v * m</c>），因此「先局部、后父级」必须写成 <c>local * parentWorld</c>；
+    /// 蒙皮矩阵同理为 <c>InverseBind * World</c>（bind 空间 → 骨空间 → 动画世界）。
+    /// 绑定姿势下所有局部旋转为单位阵，两种乘序数值相同（Skin ≡ I），所以静态预览看不出差别；
+    /// 一旦有旋转，<c>parentWorld * local</c> 会把父骨原点拿子骨旋转去转 —— 误差随「骨到原点的距离」
+    /// 放大（下半身离原点近尚可，上半身/手臂/手指链条远且长 → 撕裂成放射状薄片）。
     /// </summary>
     public void UpdateWorldMatrices()
     {
-        var identity = Matrix4x4.Identity;
+        if (_finalRotations.Length != BoneCount)
+        {
+            _finalRotations = new Quaternion[BoneCount];
+            _finalTranslations = new Vector3[BoneCount];
+        }
 
         for (int k = 0; k < DeformOrder.Length; k++)
         {
             int i = DeformOrder[k];
 
-            // System.Numerics 是行主序 row-vector 约定：local = R * T
-            Matrix4x4 local = Matrix4x4.CreateFromQuaternion(LocalRotations[i]);
-            local.Translation = LocalPositions[i];
+            Quaternion rotation = LocalRotations[i];
+            Vector3 translation = LocalTranslations[i];
+
+            // ── 軸制限：先约束「自身动画旋转」，再谈付与 ──────────────────────
+            // MMD 在动效加载时就把带軸制限骨的旋转烘焙到该轴上，因此约束发生在付与之前。
+            Vector3 axis = AxisLimits[i];
+            if (axis != Vector3.Zero)
+                rotation = ProjectOntoAxis(rotation, axis);
+
+            // ── 付与（append transform）─────────────────────────────────────
+            // 继承的是源骨的「最终」局部变换（源骨自己的付与已算完），且源骨的偏移量
+            // 取「当前局部平移 − 绑定局部平移」（即动效偏移），不是绝对位置。
+            int src = AppendSources[i];
+            if (src >= 0)
+            {
+                if (AppendRotate[i])
+                    rotation = rotation * AppendRotation(_finalRotations[src], AppendRatios[i]);
+
+                if (AppendMove[i])
+                    translation += (_finalTranslations[src] - LocalPositions[src]) * AppendRatios[i];
+            }
+
+            _finalRotations[i] = rotation;
+            _finalTranslations[i] = translation;
+
+            // local = R · T（先绕骨原点旋转，再平移到父空间中的骨位置）
+            Matrix4x4 local = Matrix4x4.CreateFromQuaternion(rotation);
+            local.Translation = translation;
 
             int parent = ParentIndices[i];
-            WorldMatrices[i] = parent >= 0 ? WorldMatrices[parent] * local : local;
-            SkinMatrices[i] = WorldMatrices[i] * InverseBind[i];
+            WorldMatrices[i] = parent >= 0 ? local * WorldMatrices[parent] : local;
+            SkinMatrices[i] = InverseBind[i] * WorldMatrices[i];
         }
+    }
+
+    /// <summary>
+    /// 把四元数的向量部分投影到 <paramref name="axis"/> 上再重新归一化 —— 只保留绕该轴的扭转，
+    /// 丢掉其余分量（reze-engine <c>applyFixedAxes</c> 同法，也是 MMD 対して 腕捩/手捩 的行为）。
+    /// </summary>
+    private static Quaternion ProjectOntoAxis(Quaternion q, Vector3 axis)
+    {
+        float dot = q.X * axis.X + q.Y * axis.Y + q.Z * axis.Z;
+        float x = axis.X * dot, y = axis.Y * dot, z = axis.Z * dot;
+        float len = MathF.Sqrt(x * x + y * y + z * z + q.W * q.W);
+        if (len <= 1e-8f) return Quaternion.Identity;
+        float inv = 1f / len;
+        return new Quaternion(x * inv, y * inv, z * inv, q.W * inv);
+    }
+
+    /// <summary>
+    /// 返「单位四元数与 <paramref name="q"/> 之间、进度为 |ratio|」的旋转。
+    /// 比率为负时先取共轭（= 反向旋转），这与 MMD 付与的 ratio &lt; 0 语义一致
+    /// （腰キャンセル 用 -1.0 来抵消腰的旋转）。
+    /// </summary>
+    private static Quaternion AppendRotation(Quaternion q, float ratio)
+    {
+        if (ratio < 0f)
+        {
+            q = new Quaternion(-q.X, -q.Y, -q.Z, q.W);
+            ratio = -ratio;
+        }
+        if (ratio >= 1f) return q;
+        return Quaternion.Slerp(Quaternion.Identity, q, ratio);
     }
 }

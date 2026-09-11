@@ -18,6 +18,7 @@ public static class SkeletalModelConverter
         {
             Materials = pmx.Materials,
             Textures = pmx.Textures,
+            MorphNames = pmx.Morphs.Select(m => m.Name).ToArray(),
         };
 
         BuildBones(pmx, model);
@@ -38,7 +39,13 @@ public static class SkeletalModelConverter
         model.BoneNames = new string[n];
         model.ParentIndices = new int[n];
         model.LocalPositions = new Vector3[n];
+        model.LocalTranslations = new Vector3[n];
         model.LocalRotations = new Quaternion[n];
+        model.AppendSources = new int[n];
+        model.AppendRatios = new float[n];
+        model.AppendRotate = new bool[n];
+        model.AppendMove = new bool[n];
+        model.AxisLimits = new Vector3[n];
         model.InverseBind = new Matrix4x4[n];
         model.WorldMatrices = new Matrix4x4[n];
         model.SkinMatrices = new Matrix4x4[n];
@@ -48,15 +55,48 @@ public static class SkeletalModelConverter
             var b = pmx.Bones[i];
             model.BoneNames[i] = b.Name;
             model.ParentIndices[i] = b.ParentBoneIndex;
-            model.LocalPositions[i] = b.Position;
+
+            // PMX 的 Bone.Position 是【模型空间绝对坐标】，局部平移必须取相对父骨的差值
+            // （PMX 规范；reze pmx-loader.ts 的 bindTranslation = pos - parentPos 同此）。
+            // 绑定姿势下 Skin ≡ 单位阵，绝对/相对两种取值渲染结果都一样，所以静态预览无感；
+            // 但 FK 动画的旋转支点取决于局部偏移 —— 用绝对值会让每根骨绕错误支点旋转
+            //（表现：上半身/脖子撕裂成放射状薄片、头部错位）。
+            int parent = b.ParentBoneIndex;
+            Vector3 local = (uint)parent < (uint)n
+                ? b.Position - pmx.Bones[parent].Position
+                : b.Position;
+
+            model.LocalPositions[i] = local;
+            model.LocalTranslations[i] = local;
             model.LocalRotations[i] = Quaternion.Identity;
+
+            // 付与（append transform）：源骨必须存在；比率钳到 [-1, 1]（PMX 允许负值，
+            // -1 表示反向抵消）。PMX 只在 HasAppendRotate / HasAppendMove 之一置位时才算付与。
+            model.AppendSources[i] = -1;
+            if (b.AppendTransform is { } a && (uint)a.ParentIndex < (uint)n)
+            {
+                model.AppendSources[i] = a.ParentIndex;
+                model.AppendRatios[i] = System.Math.Clamp(a.Ratio, -1f, 1f);
+                model.AppendRotate[i] = (b.Flag & PmxBoneFlag.HasAppendRotate) != 0;
+                model.AppendMove[i] = (b.Flag & PmxBoneFlag.HasAppendMove) != 0;
+            }
+
+            // 軸制限：存归一化轴，Zero 表示无限制（腕捩/手捩用）。
+            if (b.AxisLimit is { } axis)
+            {
+                float len = axis.Length();
+                if (len > 1e-8f) model.AxisLimits[i] = axis / len;
+            }
         }
 
-        // 遍历顺序：PMX 的 TransformOrder 规范上是拓扑序，但并非所有文件都严格保证。
-        // 这里直接从根骨做 DFS，天然保证"父先于子"，比信任 TransformOrder 更稳。
-        model.DeformOrder = BuildTopologicalOrder(model.ParentIndices);
+        // 求值顺序：PMX 的 TransformOrder 规范上是拓扑序，但并非所有文件都严格保证。
+        // 这里对「父边 ∪ 付与边」做 DFS 拓扑排序，一次保证父先于子、付与源先于付与目标
+        // （付与要读源骨已经算完的最终局部变换）。
+        model.DeformOrder = BuildEvaluationOrder(model.ParentIndices, model.AppendSources);
 
         // 绑定姿势世界矩阵 → 逆绑定矩阵
+        // 乘序与 UpdateWorldMatrices 一致（行主序 row-vector：local * parent）。
+        // 绑定姿势下局部旋转均为单位阵，逐级只累加平移，两种乘序数值相同。
         var bindWorld = new Matrix4x4[n];
         foreach (int i in model.DeformOrder)
         {
@@ -65,7 +105,7 @@ public static class SkeletalModelConverter
 
             int parent = model.ParentIndices[i];
             bindWorld[i] = parent >= 0 && (uint)parent < (uint)n
-                ? bindWorld[parent] * local
+                ? local * bindWorld[parent]
                 : local;
 
             if (!Matrix4x4.Invert(bindWorld[i], out var inv))
@@ -74,45 +114,46 @@ public static class SkeletalModelConverter
         }
     }
 
-    /// <summary>从所有根骨（parent &lt; 0）出发做迭代 DFS，返回父先于子的顺序。</summary>
-    private static int[] BuildTopologicalOrder(int[] parents)
+    /// <summary>
+    /// 对「父边 ∪ 付与边」做 DFS 拓扑排序，返回「所有依赖先于自身」的求值顺序。
+    /// 付与边必须计入：付与要读源骨<b>已经算完的最终局部变换</b>。非法数据里的环会被跳过，
+    /// 且兜底保证每根骨都出现一次。
+    /// </summary>
+    private static int[] BuildEvaluationOrder(int[] parents, int[] appendSources)
     {
         int n = parents.Length;
-        var children = new List<int>[n];
-        for (int i = 0; i < n; i++)
-        {
-            int p = parents[i];
-            if (p >= 0 && p < n)
-                (children[p] ??= new List<int>()).Add(i);
-        }
-
+        // 0=未访问, 1=在栈上, 2=已完成
+        var state = new byte[n];
         var order = new List<int>(n);
-        var visited = new bool[n];
-        var stack = new Stack<int>();
+        var stack = new Stack<(int Node, bool Post)>(n * 2);
 
-        for (int i = 0; i < n; i++)
+        for (int start = 0; start < n; start++)
         {
-            if (parents[i] >= 0 && parents[i] < n) continue;
-            stack.Push(i);
+            if (state[start] != 0) continue;
+            stack.Push((start, false));
+
             while (stack.Count > 0)
             {
-                int cur = stack.Pop();
-                if (visited[cur]) continue;
-                visited[cur] = true;
-                order.Add(cur);
+                var (u, post) = stack.Pop();
 
-                var kids = children[cur];
-                if (kids == null) continue;
-                for (int k = kids.Count - 1; k >= 0; k--)
-                    if (!visited[kids[k]])
-                        stack.Push(kids[k]);
+                if (post)
+                {
+                    state[u] = 2;
+                    order.Add(u);
+                    continue;
+                }
+
+                if (state[u] != 0) continue;   // 已被别的路径处理过（含环）
+                state[u] = 1;
+                stack.Push((u, true));
+
+                // 依赖：父骨 + 付与源骨。逆序压栈只为让输出顺序更接近文件顺序，非必需。
+                int src = appendSources[u];
+                if (src >= 0 && state[src] == 0) stack.Push((src, false));
+                int p = parents[u];
+                if (p >= 0 && p < n && state[p] == 0) stack.Push((p, false));
             }
         }
-
-        // 兜底：环或孤立节点（理论上不会出现），保证不丢骨骼
-        for (int i = 0; i < n; i++)
-            if (!visited[i])
-                order.Add(i);
 
         return order.ToArray();
     }
