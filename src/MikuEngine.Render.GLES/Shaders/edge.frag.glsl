@@ -8,7 +8,7 @@
 //
 // 混合：tec_edge 的 pass 没写 AlphaBlendEnable，D3D9 渲染状态是粘滞的，
 // 会继承 tec_model 留下的 True / SRCALPHA / INVSRCALPHA。
-// 因此 EdgeColor.w < 1 的边缘是半透明的（本模型脸/肌/足 = 0.60，其余多为 0.80）。
+// 因此 EdgeColor.w < 1 的边缘是半透明的（测试模型脸/肌/足 = 0.60，其余多为 0.80）。
 
 precision highp float;
 

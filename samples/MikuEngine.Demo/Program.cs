@@ -1,4 +1,4 @@
-﻿using Silk.NET.OpenGL;
+using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
 using Silk.NET.Windowing.Glfw;
 using Silk.NET.GLFW;
@@ -22,7 +22,7 @@ using MikuEngine.Engine;
 //   R    ：重置姿势
 // ─────────────────────────────────────────────────────────────────────────
 
-// --smoke：无人值守自检。隐藏窗口跑 20 帧 → 强制开影模式 1 → 打印中间 RT 统计 → 退出。
+// --smoke：无人值守自检。隐藏窗口跑 40 帧 → 强制开影模式 1 → 打印中间 RT 统计 → 退出。
 // 自阴影/轮廓线这类多 pass 功能的"静默失效"没法靠肉眼看画面定位，靠这个把中间结果量化。
 bool smoke = Array.Exists(args, a => a == "--smoke");
 string? pmxPath = Array.Find(args, a => !a.StartsWith("--", StringComparison.Ordinal)) ?? FindDefaultModel();
@@ -79,9 +79,13 @@ window.Load += () =>
     model = GlesModelRenderer.LoadFromFile(device, pmxPath);
     shadow = new GlesShadowRenderer(device);
     debugView = new GlesDebugOverlay(device);
-    // 影强度图 → 主渲染的 unit 4（P0-1：不接这一步，sampler 会静默采样到不完整纹理 → 恒受光）
-    model.ShadowMaskTexture = shadow.MaskTexture;
+    // 阶段 3：主渲染直接采样光照深度图做内联 PCF（不再是屏幕空间影强度图）。
+    model.ShadowZTexture = shadow.ZTexture;
+    model.ShadowTexel = shadow.Texel;
     shadow.UpdateLight(model.Model, new System.Numerics.Vector3(FrameUniforms.Default().LightDirection.X, FrameUniforms.Default().LightDirection.Y, FrameUniforms.Default().LightDirection.Z));
+    // 法线偏移偏置（reze §2 #5）：按 1.5 × 世界 texel 接线，随紧视锥密度自适应
+    //（须在 UpdateLight 之后取，半宽在那里定）。缩放模型或换密度档后需重接。
+    model.ShadowNormalOffset = shadow.TexelWorld * 1.5f;
 
     // ── 诊断输出 ────────────────────────────────────────────────────────
     var m = model.Model;
@@ -99,7 +103,7 @@ window.Load += () =>
     foreach (var seg in m.Segments) if (seg.EnableEdge) edgeCount++;
     Console.WriteLine($"[Demo] 轮廓线：{edgeCount}/{m.Segments.Length} 个材质（按 E 开关）");
     Console.WriteLine("[Demo] 自阴影：0=关 1=自阴影 2=自阴影+床影（默认 0）");
-    Console.WriteLine("[Demo] 中间 RT 调试预览：按 Z 循环 关 → Z图 → 影强度图 → 左右并排");
+    Console.WriteLine("[Demo] 光照深度图调试预览：按 Z 开关（全白=Z pass 无产出）");
     Console.WriteLine($"[Demo] 蒙皮矩阵 {m.BoneCount * 64 / 1024.0:F1} KB → SSBO" +
                       $"（UBO 最小保证仅 16 KB，这里必须用 SSBO）");
     Console.WriteLine($"[Demo] 纹理库：{model.Textures.Count - 1} 张已加载");
@@ -191,41 +195,55 @@ window.Load += () =>
             {
                 if (debugView is null) return;
                 var v = debugView.Cycle();
-                string desc = v switch
+                string desc = v == GlesDebugOverlay.View.ZMap
+                    ? "光照深度图（应：模型轮廓可见、越近越暗；全白=该 pass 什么都没画）"
+                    : "关";
+                Console.WriteLine($"[Demo] 光照深度图预览：{desc}");
+                if (v == GlesDebugOverlay.View.ZMap && shadow != null && !shadow.Enabled)
+                    Console.WriteLine("[Demo]   提示：当前影模式为 0（关），Z 图不会被渲染 —— 按 1 或 2 打开");
+            }
+            else if (key == Keys.S)
+            {
+                // 循环自阴影风格：标准 → 硬边（阈值提取）→ 软影 → 标准
+                target.ShadowStyle = target.ShadowStyle switch
                 {
-                    GlesDebugOverlay.View.ZMap => "① 光照深度图（应：模型轮廓可见、越近越暗；全白=该 pass 什么都没画）",
-                    GlesDebugOverlay.View.ShadowMask => "② 影强度图（应：该暗处有白斑；全黑=没判定出任何影）",
-                    GlesDebugOverlay.View.Both => "左右并排 左=Z图 右=影强度图",
-                    _ => "关",
+                    SelfShadowStyle.Standard => SelfShadowStyle.Threshold,
+                    SelfShadowStyle.Threshold => SelfShadowStyle.Soft,
+                    _ => SelfShadowStyle.Standard,
                 };
-                Console.WriteLine($"[Demo] 中间 RT 预览：{desc}");
-                // 影图只在模式 1/2 才渲染，看预览时顺带把影模式打开更直观
-                if (v != GlesDebugOverlay.View.Off && shadow != null && !shadow.Enabled)
-                    Console.WriteLine("[Demo]   提示：当前影模式为 0（关），影图不会被渲染 —— 按 1 或 2 打开");
+                string name = target.ShadowStyle switch
+                {
+                    SelfShadowStyle.Threshold => "硬边本影（阈值提取：连续场模糊 + smoothstep 硬化）",
+                    SelfShadowStyle.Soft => "普通阴影（PCF 软影）",
+                    _ => "标准本影（PE 16-tap）",
+                };
+                Console.WriteLine($"[Demo] 自阴影风格：{name}");
             }
         });
     }
 
-    Console.WriteLine("[Demo] 鼠标: 左键=旋转 | 右键=平移 | 滚轮=缩放 | B=弯曲测试 | E=轮廓线 | 1/2/0=自阴影 | Z=中间RT预览 | R=重置");
+    Console.WriteLine("[Demo] 鼠标: 左键=旋转 | 右键=平移 | 滚轮=缩放 | B=弯曲测试 | E=轮廓线 | 1/2/0=自阴影 | S=影风格 | Z=中间RT预览 | R=重置");
 
     if (smoke)
     {
         shadow.Mode = GlesShadowRenderer.ShadowMode.SelfShadow;
         model.SelfShadowMode = 1;
-        debugView.Current = GlesDebugOverlay.View.Both;   // 顺便走一遍预览绘制路径
-        Console.WriteLine("[Demo] --smoke：跑 20 帧 → 输出中间 RT 统计 + 影开/影关的画面差异，然后退出");
+        debugView.Current = GlesDebugOverlay.View.ZMap;   // 顺便走一遍预览绘制路径
+        Console.WriteLine("[Demo] --smoke：跑 40 帧 → 输出 Z 图统计 + 影开/影关的画面差异，然后退出");
     }
 };
 
 window.FramebufferResize += size => device?.Resize(size.X, size.Y);
 
 int smokeFrame = 0;
-byte[]? smokeMaskOn = null;    // 影模式 1 + 影强度图【已绑定】
-byte[]? smokeMaskOff = null;   // 影模式 1 + 影强度图【已断开】（cc≡0）
+byte[]? smokeOn = null;        // 标准本影，影强度 1
+byte[]? smokeIsolated = null;  // 标准本影，影强度 0（cc≡0，隔离测试）
+byte[]? smokeHard = null;      // 硬边本影（阈值提取），影强度 1
+byte[]? smokeSoft = null;      // 普通阴影，影强度 1
 byte[]? smokeFloorOn = null;   // 影模式 2（含床影）
 window.Render += dt =>
 {
-    if (smoke && ++smokeFrame > 26) { window.Close(); return; }
+    if (smoke && ++smokeFrame > 40) { window.Close(); return; }
     if (device == null || grid == null) return;
 
     device.BeginFrame();
@@ -244,18 +262,16 @@ window.Render += dt =>
     frame.View = FromColumnMajor(view);
     frame.CameraPosition = new System.Numerics.Vector4(camera.Position, 0f);
 
-    if (model != null && shadow != null && shadow.Enabled)
-    {
-        // ⚠️ 影图 pass 复用模型的 per-frame UBO，必须先上传再渲影图，
-        //    否则影图拿到的是上一帧的矩阵（首帧更是单位阵 → 全屏影）。
-        frame.LightViewProj = shadow.LightViewProj;
-        model.UploadFrame(in frame);
-        shadow.RenderShadowMaps(device, model, w, h);
-        model.Draw(in frame);
-    }
-    else if (model != null)
+    if (model != null)
     {
         frame.LightViewProj = shadow?.LightViewProj ?? System.Numerics.Matrix4x4.Identity;
+        // 阶段 0：帧首统一上传（重算蒙皮矩阵 + UBO + 蒙皮 SSBO），
+        // 影图 pass 与主渲染都读同一份、且是本帧的最新值（修复了上一帧滞后的坑）。
+        model.PrepareFrame(in frame);
+
+        if (shadow != null && shadow.Enabled)
+            shadow.RenderShadowMaps(device, model, w, h);
+
         model.Draw(in frame);
     }
 
@@ -267,9 +283,9 @@ window.Render += dt =>
         shadow.DrawFloor(device, new System.Numerics.Vector3(
             frame.LightColor.X, frame.LightColor.Y, frame.LightColor.Z));
 
-    // 中间 RT 只读预览（修复计划 · 步骤 1）：必须放在所有 3D 绘制之后
+    // 光照深度图只读预览：必须放在所有 3D 绘制之后
     if (shadow != null && debugView != null && debugView.Current != GlesDebugOverlay.View.Off)
-        debugView.Render(shadow.ZTexture, shadow.MaskTexture);
+        debugView.Render(shadow.ZTexture);
 
     if (smoke && shadow != null && debugView != null)
     {
@@ -282,71 +298,106 @@ window.Render += dt =>
 
             case 6:
                 shadow.DumpMapStats();
-                smokeMaskOn = ReadViewport(device, w, h);
-                Console.WriteLine($"[Demo] A) 影模式1 + 影强度图已绑定：校验和 {Checksum(smokeMaskOn)}");
+                smokeOn = ReadViewport(device, w, h);
+                Console.WriteLine($"[Demo] A) 标准本影 + 影强度 1：校验和 {Checksum(smokeOn)}");
+                break;
+
+            case 8:
+                // 隔离测试：保持影模式 1，把影强度置 0 → cc≡0。
+                if (model != null) model.SelfShadowStrength = 0f;
+                Console.WriteLine("[Demo] B) 标准本影，影强度=0（等价 cc≡0）");
                 break;
 
             case 10:
-                // 隔离测试：保持影模式 1（即仍走 PE 的"不做 col*=toonCol"分支），
-                // 只把影强度图断开 → sampler 采样不完整纹理恒返回 (0,0,0,1) → cc≡0。
-                // 这样 A/B 的唯一差别就只剩【自阴影本身】，排除 toon 分支切换带来的整体明暗变化。
-                if (model != null) model.ShadowMaskTexture = 0;
-                Console.WriteLine("[Demo] B) 仍为影模式1，但断开影强度图（等价 cc≡0）");
+                smokeIsolated = ReadViewport(device, w, h);
+                Console.WriteLine($"[Demo] B) 校验和 {Checksum(smokeIsolated)}");
+                if (smokeOn != null)
+                {
+                    int d = CountDiff(smokeOn, smokeIsolated);
+                    Console.WriteLine($"[Demo] ⇒ 标准本影贡献：{d} 象素（{d * 100.0 / (w * h):F3}%）" +
+                        (d == 0 ? "  ❌ 无影响" : "  ✅ 有影响"));
+                }
+                if (model != null) model.SelfShadowStrength = 1f;
                 break;
 
             case 12:
-                smokeMaskOff = ReadViewport(device, w, h);
-                Console.WriteLine($"[Demo] B) 校验和 {Checksum(smokeMaskOff)}");
-                if (smokeMaskOn != null)
-                {
-                    int d = CountDiff(smokeMaskOn, smokeMaskOff);
-                    Console.WriteLine($"[Demo] ⇒ 自阴影本身的贡献：{d} 象素（{d * 100.0 / (w * h):F3}%）" +
-                        (d == 0 ? "  ❌ 影强度图对画面没有影响" : "  ✅ 影强度图确实在影响画面"));
-                }
+                shadow.Mode = GlesShadowRenderer.ShadowMode.Off;
+                if (model != null) model.SelfShadowMode = 0;
+                Console.WriteLine("[Demo] C) 切到影模式 0（走 col *= toonCol 分支）");
                 break;
 
             case 14:
-                shadow.Mode = GlesShadowRenderer.ShadowMode.Off;
-                if (model != null) model.SelfShadowMode = 0;
-                Console.WriteLine("[Demo] C) 切到影模式 0（会走 col *= toonCol 分支）");
+                if (smokeIsolated != null)
+                {
+                    var off = ReadViewport(device, w, h);
+                    int d = CountDiff(smokeIsolated, off);
+                    Console.WriteLine($"[Demo] C) 校验和 {Checksum(off)}");
+                    Console.WriteLine($"[Demo] ⇒ 标准本影(cc=0) vs 影模式0（PE「二选一」明暗差）：" +
+                        $"{d} 象素（{d * 100.0 / (w * h):F3}%）");
+                }
+                shadow.Mode = GlesShadowRenderer.ShadowMode.SelfShadow;
+                if (model != null) { model.SelfShadowMode = 1; model.ShadowStyle = SelfShadowStyle.Threshold; }
+                Console.WriteLine("[Demo] D) 硬边本影（阈值提取）");
                 break;
 
             case 16:
-                if (smokeMaskOff != null)
-                {
-                    var off = ReadViewport(device, w, h);
-                    int d = CountDiff(smokeMaskOff, off);
-                    Console.WriteLine($"[Demo] C) 校验和 {Checksum(off)}");
-                    Console.WriteLine($"[Demo] ⇒ 影模式1 vs 影模式0（含 PE「二选一」结构导致的整体明暗差）：" +
-                        $"{d} 象素（{d * 100.0 / (w * h):F3}%）");
-                }
+                smokeHard = ReadViewport(device, w, h);
+                if (model != null) model.SelfShadowStrength = 0f;
                 break;
 
             case 18:
-                // 床影验收：模式 2 与模式 1 的唯一差别就是"贴地 overlay 有没有画"。
-                // 修复前它被后画的格网盖掉/与格网 z-fight，贡献接近 0。
-                shadow.Mode = GlesShadowRenderer.ShadowMode.SelfShadowAndFloor;
-                if (model != null) model.SelfShadowMode = 2;
-                Console.WriteLine("[Demo] D) 影模式 2（自阴影 + 床影）");
+                if (smokeHard != null)
+                {
+                    var off = ReadViewport(device, w, h);
+                    int d = CountDiff(smokeHard, off);
+                    Console.WriteLine($"[Demo] ⇒ 硬边本影贡献：{d} 象素（{d * 100.0 / (w * h):F3}%）" +
+                        (d == 0 ? "  ❌ 无影响" : "  ✅ 有影响"));
+                }
+                if (model != null) { model.SelfShadowStrength = 1f; model.ShadowStyle = SelfShadowStyle.Soft; }
+                Console.WriteLine("[Demo] E) 普通阴影（软影）");
                 break;
 
             case 20:
-                smokeFloorOn = ReadViewport(device, w, h);
-                Console.WriteLine($"[Demo] D) 校验和 {Checksum(smokeFloorOn)}");
+                smokeSoft = ReadViewport(device, w, h);
+                if (model != null) model.SelfShadowStrength = 0f;
                 break;
 
             case 22:
-                shadow.Mode = GlesShadowRenderer.ShadowMode.SelfShadow;
-                if (model != null) model.SelfShadowMode = 1;
-                Console.WriteLine("[Demo] E) 影模式 1（关掉床影，其余不变）");
+                if (smokeSoft != null)
+                {
+                    var off = ReadViewport(device, w, h);
+                    int d = CountDiff(smokeSoft, off);
+                    Console.WriteLine($"[Demo] ⇒ 普通阴影贡献：{d} 象素（{d * 100.0 / (w * h):F3}%）" +
+                        (d == 0 ? "  ❌ 无影响" : "  ✅ 有影响"));
+                }
+                if (model != null) { model.SelfShadowStrength = 1f; model.ShadowStyle = SelfShadowStyle.Standard; }
+                Console.WriteLine("[Demo] F) 回到标准本影");
                 break;
 
             case 24:
+                // 床影验收：模式 2 与模式 1 的唯一差别就是"贴地 overlay 有没有画"。
+                shadow.Mode = GlesShadowRenderer.ShadowMode.SelfShadowAndFloor;
+                if (model != null) model.SelfShadowMode = 2;
+                Console.WriteLine("[Demo] G) 影模式 2（自阴影 + 床影）");
+                break;
+
+            case 26:
+                smokeFloorOn = ReadViewport(device, w, h);
+                Console.WriteLine($"[Demo] G) 校验和 {Checksum(smokeFloorOn)}");
+                break;
+
+            case 28:
+                shadow.Mode = GlesShadowRenderer.ShadowMode.SelfShadow;
+                if (model != null) model.SelfShadowMode = 1;
+                Console.WriteLine("[Demo] H) 影模式 1（关掉床影，其余不变）");
+                break;
+
+            case 30:
                 if (smokeFloorOn != null)
                 {
                     var noFloor = ReadViewport(device, w, h);
                     int d = CountDiff(smokeFloorOn, noFloor);
-                    Console.WriteLine($"[Demo] E) 校验和 {Checksum(noFloor)}");
+                    Console.WriteLine($"[Demo] H) 校验和 {Checksum(noFloor)}");
                     Console.WriteLine($"[Demo] ⇒ 床影的贡献：{d} 象素（{d * 100.0 / (w * h):F3}%）" +
                         (d == 0 ? "  ❌ 床影完全看不到（被格网盖掉？）" : "  ✅ 床影画在地面上了"));
                 }

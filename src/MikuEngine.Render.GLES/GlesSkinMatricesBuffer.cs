@@ -8,7 +8,7 @@ namespace MikuEngine.Render.GLES;
 /// 整帧所有角色共用的蒙皮矩阵 SSBO。
 ///
 /// 为什么不用 UBO：GLES 3.1 的 <c>GL_MAX_UNIFORM_BLOCK_SIZE</c> 最小保证只有 16 KB，
-/// 而 500 骨骼就要 32 KB；本仓库 Model.pmx 有 1099 骨 ≈ 70 KB，UBO 直接爆掉。
+/// 而 500 骨骼就要 32 KB；测试用的 Model.pmx 有 1099 骨 ≈ 70 KB，UBO 直接爆掉。
 /// <c>GL_MAX_SHADER_STORAGE_BLOCK_SIZE</c> 的最小保证是 128 MB，绰绰有余。
 ///
 /// layout 与 shader 一致：<c>layout(std430, binding = 1) buffer { mat4 uSkinMatrices[]; }</c>
@@ -35,7 +35,7 @@ public sealed unsafe class GlesSkinMatricesBuffer : IDisposable
             EnsureCapacity(initialBoneCapacity);
     }
 
-    /// <summary>扩容（double + 拷旧数据）。修正了设计文档里 oldCap 未声明 / 容量未回写的两处笔误。</summary>
+    /// <summary>扩容。</summary>
     public void EnsureCapacity(int requiredBoneCount)
     {
         if (requiredBoneCount <= CapacityBoneCount) return;

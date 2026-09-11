@@ -14,10 +14,9 @@
 //
 // 常量（fxd L29-31）：EdgeValue=1.0、BaseEdgeValue=0.015、BaseDistanceInv=0.1
 //
-// ⚠️ 与 PE 的一处刻意差异：PE 的 `EdgeValue` 是**模型级**全局值（编辑器 UI「サイズ」，
-//    `PmxModel.EdgeValue`），而 PMX 里 EdgeSize 本是**逐材质**的。本模型实测三档
-//    （0.65 / 1.0 / 1.2，兔子 1.2 明显是作者刻意调的），所以这里用逐材质 EdgeSize。
-//    若要逐像素对齐 PE 的某个截图，把 uMaterialEdgeSize 换成统一的全局值即可。
+// 与 PE 的一处刻意差异：PE 的 EdgeValue 是**模型级**全局值（编辑器 UI「サイズ」，
+// PmxModel.EdgeValue），而 PMX 里 EdgeSize 本是**逐材质**的。本模型实测三档
+// 若要逐像素对齐 PE 的某个截图，把 uMaterialEdgeSize 换成统一的全局值即可。
 
 precision highp float;
 precision highp int;

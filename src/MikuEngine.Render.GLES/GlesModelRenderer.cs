@@ -34,7 +34,7 @@ public struct FrameUniforms
         ViewProj = Matrix4x4.Identity,
         View = Matrix4x4.Identity,
         CameraPosition = new Vector4(0f, 0f, 1f, 0f),
-        // ⚠️ 以下三个是 PmxEditor 的默认值（反编译 PmxEditorCore L12531-12535，InitializeDevice）：
+        // 注意：以下三个是 PmxEditor 的默认值（反编译 PmxEditorCore L12531-12535，InitializeDevice）：
         //   m_manager.Ambient = System.Drawing.Color.White;
         //   m_manager.SetLightDirection(new Vector3(-0.5f, -1f, 0.5f));   ← Z 是 +0.5
         //   m_manager.SetLightColor(new Color4(0.5f, 0.5f, 0.5f));        ← 0.5 灰，不是 1
@@ -48,11 +48,22 @@ public struct FrameUniforms
     };
 }
 
+/// <summary>自阴影风格。三者消费同一张 Z 图，只差采样与注入方式。</summary>
+public enum SelfShadowStyle
+{
+    /// <summary>标准本影：16-tap PCF + PE 二选一注入（ToonMode 0 压亮度 / 否则 lerp 到 toon 角点）。</summary>
+    Standard = 1,
+    /// <summary>硬边本影：连续场高斯模糊 + smoothstep 阈值提取 + 影色乘性暗度（硬核心 + 平滑边界）。</summary>
+    Threshold = 2,
+    /// <summary>普通阴影：PCF 软影 + 直接遮蔽乘子（≈ PBR 软影观感）。</summary>
+    Soft = 3,
+}
+
 /// <summary>
-/// PMX 模型渲染器（Phase 0 / 0.5：静态预览）。
+/// PMX 模型渲染器。
 ///
 /// 职责：VAO/VBO/EBO + 蒙皮矩阵 SSBO + 纹理 + 按 Opaque / Cutout / Blended 三队列排序绘制。
-/// 未实现：Morph、Edge/Outline pass、自阴影、SDEF 真实现（见 docs/shader-design.md §4）。
+/// 未实现：Morph、SDEF。
 /// </summary>
 public sealed unsafe class GlesModelRenderer : IDisposable
 {
@@ -76,7 +87,10 @@ public sealed unsafe class GlesModelRenderer : IDisposable
 
     // edge program 的 uniform
     private readonly int _locEdgeSkinMatBase, _locEdgeColor, _locEdgeSize;
-    private readonly int _locSelfShadow, _locToonMode, _locShadowMap;
+    private readonly int _locSelfShadow, _locToonMode;
+    private readonly int _locShadowZMap, _locShadowTexel, _locSelfShadowStrength;
+    private readonly int _locShadowStyle, _locShadowColor, _locShadowBias, _locShadowBiasMax, _locShadowSlopeBias, _locShadowSoftness, _locShadowEdge;
+    private readonly int _locNormalOffset;
 
     public Core.Models.SkeletalModel Model => _model;
 
@@ -87,15 +101,65 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     public int SelfShadowMode { get; set; } = 0;
 
     /// <summary>
-    /// 影强度图（<see cref="GlesShadowRenderer.MaskTexture"/>），采样器单元 4。
-    ///
-    /// ⚠️ 必须真的绑上：GL 里"声明了 sampler 但没绑纹理"不会报错，
-    /// 采样不完整的默认纹理对象会**恒返回 (0,0,0,1)**，于是 cc=0、颜色一点不变 ——
-    /// 表现为"自阴影完全无效但没有任何错误"。这就是 P0-1。
-    ///
-    /// 0 表示未提供：此时不绑定，行为与"无自阴影"一致（安全降级，不会变全黑）。
+    /// 光照深度图（<see cref="GlesShadowRenderer.ZTexture"/>），采样器单元 3。
+    /// 自阴影改为内联 PCF直接采样这张图，不再是屏幕空间影强度图。
+    /// 0 表示未提供：此时不绑定，采样不完整纹理恒返回 (0,0,0,1)（= 不在影里），安全降级。
     /// </summary>
-    public uint ShadowMaskTexture { get; set; }
+    public uint ShadowZTexture { get; set; }
+
+    /// <summary>1/影图边长（= <see cref="GlesShadowRenderer.Texel"/>），PCF 核缩放。</summary>
+    public float ShadowTexel { get; set; } = 1f / 1024f;
+
+    /// <summary>影强度（默认 1；0 = 全受光，隔离测试用）。三模式共享的全局参数。</summary>
+    public float SelfShadowStrength { get; set; } = 1f;
+
+    /// <summary>自阴影风格：标准本影 / 硬边本影（阈值提取）/ 普通阴影。</summary>
+    public SelfShadowStyle ShadowStyle { get; set; } = SelfShadowStyle.Standard;
+
+    /// <summary>
+    /// 硬边本影的影色—— 语义是<b>乘性暗度</b>而非替换色：
+    /// 影内 <c>col.rgb *= mix(1, uShadowColor.rgb, 影强度)</c>（1 = 不变，0.5 = 压暗一半，0 = 全黑）。
+    /// 默认 0.5 灰 = MMD 式暗化：影区仍是原色的一半，贴图 / 球面 / toon 都能透出来。
+    /// </summary>
+    public System.Numerics.Vector4 ShadowColor { get; set; } = new(0.5f, 0.5f, 0.5f, 1f);
+
+    /// <summary>
+    /// 深度比较偏置的<b>常数底</b>（默认 0.0005）：所有片元都至少拿到这么多余量。
+    /// 原来的全屏常数 0.003 ≈ 掠射到 82° 才需要的量，对正对面的近距离阴影属于过量偏置，
+    /// 会把背光侧眉这类「遮挡余量小」的影整片推掉（实测 0.003 时左右眉 11.5% vs 2.6%）。
+    /// 现在超出常数底的部分交给 <see cref="ShadowSlopeBias"/> 按面朝向自适应。
+    /// </summary>
+    public float ShadowBias { get; set; } = 0.0005f;
+
+    /// <summary>
+    /// 偏置<b>上限</b>（默认 0.003 =  5 的全屏常数，也是
+    /// <see cref="GlesShadowRenderer.ShadowMargin"/>）：斜率项封顶在这里，
+    /// 保证掠射面拿到的余量不超过原行为，陡面 acne 不会回退。
+    /// </summary>
+    public float ShadowBiasMax { get; set; } = 0.003f;
+
+    /// <summary>
+    /// 斜率缩放系数（默认 2）：偏置 = <c>常数底 + 系数 × 一个影图 texel 内自身深度的变化量</c>，
+    /// 再被 <see cref="ShadowBiasMax"/> 封顶。正对面该项≈0（只吃常数底，不误伤近距离阴影）；
+    /// 掠射面该项随 tan(入射角) 增大（继续压住 acne）。调大 ⇒ 更保险但更容易吃掉薄影；
+    /// 调小 ⇒ 薄影更完整但 acne 风险回升。
+    /// </summary>
+    public float ShadowSlopeBias { get; set; } = 2f;
+
+    /// <summary>硬边本影的核宽 / 普通阴影的 PCF 核宽（>1 更软）。</summary>
+    public float ShadowSoftness { get; set; } = 1f;
+
+    /// <summary>
+    /// 硬边本影（style 2）的阈值带宽 w：连续场模糊后 smoothstep 的半宽，
+    /// 越小边界越硬（0.3~0.5 ≈ MMD 的硬边观感），越大边界越平滑。
+    /// </summary>
+    public float ShadowEdge { get; set; } = 0.35f;
+
+    /// <summary>
+    /// 法线偏移偏置（MMD 世界单位）：接收位置沿世界法线推离表面再算光空间坐标，
+    /// 消弧面（脸/裙内）acne。按 1.5 × 世界 texel 接线（demo），随影图密度自适应。
+    /// </summary>
+    public float ShadowNormalOffset { get; set; } = 0.00f;
 
     // 供自阴影 pass 复用（同一份蒙皮 SSBO 与 per-frame UBO）
     public uint Vao => _vao;
@@ -127,13 +191,23 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         _locSphereMode = gl.GetUniformLocation(_program, "uSphereMode");
         _locSelfShadow = gl.GetUniformLocation(_program, "uEnableSelfShadow");
         _locToonMode = gl.GetUniformLocation(_program, "uToonMode");
-        _locShadowMap = gl.GetUniformLocation(_program, "uShadowMap");
+        _locShadowZMap = gl.GetUniformLocation(_program, "uShadowZMap");
+        _locShadowTexel = gl.GetUniformLocation(_program, "uShadowTexel");
+        _locSelfShadowStrength = gl.GetUniformLocation(_program, "uSelfShadowStrength");
+        _locShadowStyle = gl.GetUniformLocation(_program, "uShadowStyle");
+        _locShadowColor = gl.GetUniformLocation(_program, "uShadowColor");
+        _locShadowBias = gl.GetUniformLocation(_program, "uShadowBias");
+        _locShadowBiasMax = gl.GetUniformLocation(_program, "uShadowBiasMax");
+        _locShadowSlopeBias = gl.GetUniformLocation(_program, "uShadowSlopeBias");
+        _locShadowSoftness = gl.GetUniformLocation(_program, "uShadowSoftness");
+        _locShadowEdge = gl.GetUniformLocation(_program, "uShadowEdge");
+        _locNormalOffset = gl.GetUniformLocation(_program, "uNormalOffset");
         _locDiffuseTex = gl.GetUniformLocation(_program, "uDiffuseTex");
         _locSphereTex = gl.GetUniformLocation(_program, "uSphereTex");
         _locToonTex = gl.GetUniformLocation(_program, "uToonTex");
 
-        // ⚠️ 位置为 -1 意味着着色器里没有这个 uniform（名字打错 / 类型不匹配被优化掉），
-        //    后续 glUniform* 会静默失效 —— 曾因此导致整体贴图丢失，这里显式暴露。
+        // 注意：位置为 -1 意味着着色器里没有这个 uniform（名字打错 / 类型不匹配被优化掉），
+        // 后续 glUniform* 会静默失效 —— 曾因此导致整体贴图丢失，这里显式暴露。
         foreach (var (name, loc) in new (string, int)[]
         {
             ("uSkinMatBase", _locSkinMatBase), ("uMaterialDiffuse", _locDiffuse),
@@ -141,13 +215,20 @@ public sealed unsafe class GlesModelRenderer : IDisposable
             ("uMaterialAmbient", _locAmbient), ("uEnableTexture", _locEnableTexture),
             ("uEnableSphere", _locEnableSphere), ("uEnableToon", _locEnableToon),
             ("uSphereMode", _locSphereMode), ("uEnableSelfShadow", _locSelfShadow),
-            ("uToonMode", _locToonMode), ("uShadowMap", _locShadowMap),
+            ("uToonMode", _locToonMode), ("uShadowZMap", _locShadowZMap),
+            ("uShadowTexel", _locShadowTexel), ("uSelfShadowStrength", _locSelfShadowStrength),
+            ("uShadowStyle", _locShadowStyle), ("uShadowColor", _locShadowColor),
+            ("uShadowBias", _locShadowBias), ("uShadowBiasMax", _locShadowBiasMax),
+            ("uShadowSlopeBias", _locShadowSlopeBias),
+            ("uShadowSoftness", _locShadowSoftness),
+            ("uShadowEdge", _locShadowEdge),
+            ("uNormalOffset", _locNormalOffset),
             ("uDiffuseTex", _locDiffuseTex), ("uSphereTex", _locSphereTex),
             ("uToonTex", _locToonTex),
         })
         {
             if (loc < 0)
-                Console.WriteLine($"[GlesModelRenderer] ⚠️ uniform 未找到：{name}");
+                Console.WriteLine($"[GlesModelRenderer] uniform 未找到：{name}");
         }
 
         // ── 轮廓线 program（PE: technique tec_edge，独立于主渲染）──────────
@@ -165,7 +246,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         })
         {
             if (loc < 0)
-                Console.WriteLine($"[GlesModelRenderer] ⚠️ edge uniform 未找到：{name}");
+                Console.WriteLine($"[GlesModelRenderer] edge uniform 未找到：{name}");
         }
 
         // ── 顶点缓冲 ────────────────────────────────────────────────────
@@ -195,7 +276,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         gl.EnableVertexAttribArray(2);
         gl.VertexAttribPointer(2, 4, VertexAttribPointerType.Float, false, (uint)stride, (void*)24);
 
-        // 骨骼索引：UNSIGNED_SHORT ×4（本模型 1099 骨，UByte 装不下）
+        // 骨骼索引：UNSIGNED_SHORT ×4（测试模型 1099 骨，UByte 装不下）
         gl.EnableVertexAttribArray(3);
         gl.VertexAttribIPointer(3, 4, VertexAttribIType.UnsignedShort, (uint)stride, (void*)40);
 
@@ -271,7 +352,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
 
     /// <summary>
     /// 上传 per-frame UBO。自阴影的影图 pass 复用这份 UBO，
-    /// 因此【必须先于】<see cref="RenderShadowMaps"/> 调用，否则影图会用到上一帧的矩阵。
+    /// 因此必须先于<see cref="RenderShadowMaps"/> 调用，否则影图会用到上一帧的矩阵。
     /// </summary>
     public void UploadFrame(in FrameUniforms frame)
     {
@@ -279,44 +360,59 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         _device.UpdateUbo(_frameUbo, ref uniforms);
     }
 
-    /// <summary>每帧调用。</summary>
+    /// <summary>
+    /// 帧首统一准备：重算世界/蒙皮矩阵 + 上传 UBO + 上传蒙皮矩阵 SSBO。
+    ///
+    /// 注意：必须先于影图 pass 调用。修复前蒙皮矩阵在 <see cref="Draw"/> 里才上传，
+    ///    而 Draw 在 RenderShadowMaps 之后 ⇒ 影图读的是上一帧的骨架（1 帧滞后；
+    ///    运行时增删模型时 baseOffset 会位移 ⇒ 甚至读错模型）。UBO 之前修过、SSBO 只修了一半，
+    ///    这里把两者都抽到帧首，一次补齐。
+    /// </summary>
+    public void PrepareFrame(in FrameUniforms frame)
+    {
+        _model.UpdateWorldMatrices();
+        UploadFrame(in frame);
+        _skin.BeginFrame();
+        SkinMatrixBaseOffset = _skin.Append(_model.SkinMatrices);
+        _skin.Flush();
+    }
+
+    /// <summary>每帧调用。必须先调用 <see cref="PrepareFrame"/>。</summary>
     /// <param name="toonMode">0=无 1=MMD toon 2=固有（PE 的 ToonMode）</param>
     public void Draw(in FrameUniforms frame, float toonMode = 1f)
     {
         uToonMode = toonMode;
         var gl = _device.Gl;
 
-        _model.UpdateWorldMatrices();
-
         gl.UseProgram(_program);
 
-        UploadFrame(in frame);
-        var gl2 = gl; _ = gl2;
         gl.BindBufferBase(BufferTargetARB.UniformBuffer, 0, _frameUbo);
-
-        _skin.BeginFrame();
-        SkinMatrixBaseOffset = _skin.Append(_model.SkinMatrices);
-        _skin.Flush();
         _skin.Bind(1);
         gl.Uniform1(_locSkinMatBase, (float)SkinMatrixBaseOffset);
 
         gl.BindVertexArray(_vao);
 
-        // 采样器单元：0=主纹理 1=球贴图 2=toon
+        // 采样器单元：0=主纹理 1=球贴图 2=toon 3=光照深度图（内联 PCF）
         int unit;
         unit = 0; gl.Uniform1(_locDiffuseTex, unit);
         unit = 1; gl.Uniform1(_locSphereTex, unit);
         unit = 2; gl.Uniform1(_locToonTex, unit);
-        unit = 4; gl.Uniform1(_locShadowMap, unit);   // 3 被 shadow renderer 的 Z 图占用
+        unit = 3; gl.Uniform1(_locShadowZMap, unit);
+        gl.Uniform1(_locShadowTexel, ShadowTexel);
+        gl.Uniform1(_locSelfShadowStrength, SelfShadowStrength);
+        gl.Uniform1(_locShadowStyle, (float)(int)ShadowStyle);
+        gl.Uniform4(_locShadowColor, ShadowColor.X, ShadowColor.Y, ShadowColor.Z, ShadowColor.W);
+        gl.Uniform1(_locShadowBias, ShadowBias);
+        gl.Uniform1(_locShadowBiasMax, ShadowBiasMax);
+        gl.Uniform1(_locShadowSlopeBias, ShadowSlopeBias);
+        gl.Uniform1(_locShadowSoftness, ShadowSoftness);
+        gl.Uniform1(_locShadowEdge, ShadowEdge);
+        gl.Uniform1(_locNormalOffset, ShadowNormalOffset);
 
-        // 影强度图绑到 unit 4（P0-1）。缺这一步不会报错，只会让自阴影静默失效。
-        //
-        // ⚠️ ShadowMaskTexture == 0 时必须【显式解绑】：GL 的纹理绑定是粘滞状态，
-        //    只"跳过 bind"并不会把上一帧绑上去的纹理摘下来 —— 那样做隔离实验会得到
-        //    "A、B 两帧校验和完全相同"的假结果（踩过）。
-        //    绑定 0 之后该 unit 是不完整纹理，采样恒返回 (0,0,0,1)，即 cc≡0。
-        gl.ActiveTexture(TextureUnit.Texture4);
-        gl.BindTexture(TextureTarget.Texture2D, ShadowMaskTexture);
+        // 注意：ShadowZTexture == 0 时必须显式解绑：GL 纹理绑定是粘滞状态，
+        //    "跳过 bind"摘不掉上一帧的绑定（踩过，会得到 A/B 校验和相同的假结果）。
+        gl.ActiveTexture(TextureUnit.Texture3);
+        gl.BindTexture(TextureTarget.Texture2D, ShadowZTexture);
         gl.ActiveTexture(TextureUnit.Texture0);
 
         // ── 单一队列、按 PMX 材质顺序（对齐 PmxEditor，2026-09-10 修订）────────
@@ -361,7 +457,9 @@ public sealed unsafe class GlesModelRenderer : IDisposable
             gl.Uniform1(_locEnableSphere, seg.EnableSphere ? 1f : 0f);
             gl.Uniform1(_locEnableToon, seg.EnableToon ? 1f : 0f);
             gl.Uniform1(_locSphereMode, (float)(int)seg.SphereMode);
-            gl.Uniform1(_locSelfShadow, (float)SelfShadowMode);
+            // 收影侧旗标（PMX bit3 = EnabledReceiveShadow）。
+            // 材质未标"收影"时强制关掉自阴影（走 col *= toonCol 分支），行为对齐 MMD。
+            gl.Uniform1(_locSelfShadow, (SelfShadowMode > 0 && seg.ReceivesShadow) ? (float)SelfShadowMode : 0f);
             gl.Uniform1(_locToonMode, uToonMode);
 
             gl.ActiveTexture(TextureUnit.Texture0);
@@ -383,10 +481,10 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     /// 轮廓线 pass（PE: technique tec_edge）。
     ///
     /// 要点：
-    ///  · 主渲染全部画完之后再画 —— edge 外扩壳与本体共享深度，后画才能被正确遮挡
-    ///  · 只画 (flag & EnabledToonEdge) != 0 且 EdgeSize &gt; 0 的材质（本模型 42 个里 23 个）
-    ///  · 复用同一个 VAO：edge VS 用的 attribute 槽位与主 VS 完全一致
-    ///  · 剔除状态与主渲染同规则（逐材质按双面 flag）；blend 恒开，
+    ///  1. 主渲染全部画完之后再画 —— edge 外扩壳与本体共享深度，后画才能被正确遮挡
+    ///  2. 只画 (flag & EnabledToonEdge) != 0 且 EdgeSize &gt; 0 的材质（本模型 42 个里 23 个）
+    ///  3. 复用同一个 VAO：edge VS 用的 attribute 槽位与主 VS 完全一致
+    ///  4. 剔除状态与主渲染同规则（逐材质按双面 flag）；blend 恒开，
     ///    因此 EdgeColor.w &lt; 1 的边缘是半透明的（本模型脸/肌/足 = 0.60）
     /// </summary>
     private void DrawEdges()
@@ -407,7 +505,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
 
             ApplyRenderState(gl, seg.IsDoubleSided);
 
-            // ⚠️ inverted hull 必须剔除正面，否则外扩壳的正面比本体更靠近相机、
+            // 注意：inverted hull 必须剔除正面，否则外扩壳的正面比本体更靠近相机、
             //    深度测试必然通过，会把整个本体盖成轮廓色（已实测踩坑）。
             //    剔掉正面后只剩壳体的背面，恰好只在轮廓边缘露出一条边。
             //
@@ -424,9 +522,9 @@ public sealed unsafe class GlesModelRenderer : IDisposable
 
     /// <summary>
     /// 对齐 PmxEditor（2026-09-10 修订）：
-    ///   · blend 恒开 SRC_ALPHA/INV_SRC_ALPHA（a=1 时是恒等混合，对不透明零副作用）
-    ///   · 深度写恒开、无 alpha test
-    ///   · <b>默认剔除背面</b>；材质带 PMX 両面（IsDoubleSided）flag 时关闭剔除
+    ///   1. blend 恒开 SRC_ALPHA/INV_SRC_ALPHA（a=1 时是恒等混合，对不透明零副作用）
+    ///   2. 深度写恒开、无 alpha test
+    ///   3. <b>默认剔除背面</b>；材质带 PMX 両面（IsDoubleSided）flag 时关闭剔除
     ///
     /// 剔除这块的反编译证据（PmxEditorCore L25914-25934）：
     /// <code>

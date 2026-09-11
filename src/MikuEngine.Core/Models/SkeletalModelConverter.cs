@@ -6,10 +6,9 @@ namespace MikuEngine.Core.Models;
 /// <summary>
 /// PmxModel（PMX 原始数据）→ SkeletalModel（运行时模型）。
 ///
-/// 对应 docs/model-rendering-design.md §3.1 与 docs/shader-design.md §5.2。
-/// 本阶段（Phase 0 / 0.5）只做静态预览所需的部分：
+/// 当前只做静态预览所需的部分：
 ///   交错 VBO / 统一索引缓冲 / 逆绑定矩阵 / 变形顺序 / 材质段分类。
-/// Morph、SoftBody、SDEF 真实现留到后续阶段。
+/// Morph、SoftBody、SDEF 真实现留到后续。
 /// </summary>
 public static class SkeletalModelConverter
 {
@@ -179,7 +178,7 @@ public static class SkeletalModelConverter
     }
 
     /// <summary>
-    /// 权重 → 字节。规则与 docs/shader-design.md §5.2.1 一致（v1 退化 SDEF→BDEF2、QDEF→BDEF4）。
+    /// 权重 → 字节。（v1 退化 SDEF→BDEF2、QDEF→BDEF4）。
     /// 第 4 槽用<b>推导值</b> 1-w0-w1-w2（不是文件里存的 Weight3），保证四槽和为 255，
     /// 对权重和异常的脏数据更稳。
     /// </summary>
@@ -285,8 +284,10 @@ public static class SkeletalModelConverter
                 EnableToon = m.ToonTextureIndex >= 0,
                 IsDoubleSided = (m.Flag & PmxMaterialFlag.IsDoubleSided) != 0,
                 // MMD 语义：需要「ToonEdge flag 置位」且「EdgeSize > 0」才画轮廓线。
-                // 本模型 42 个材质里 23 个满足；不能用 ||，否则头发系（flag 未置位）会误画。
                 EnableEdge = (m.Flag & PmxMaterialFlag.EnabledToonEdge) != 0 && m.EdgeSize > 0f,
+                // 铸影 / 收影旗标（铸影侧不能省、收影侧可省）。
+                CastsShadow = (m.Flag & PmxMaterialFlag.EnabledDrawShadow) != 0,
+                ReceivesShadow = (m.Flag & PmxMaterialFlag.EnabledReceiveShadow) != 0,
                 Center = ComputeSegmentCenter(pmx, cursor, indexCount),
             };
 
@@ -297,7 +298,7 @@ public static class SkeletalModelConverter
     }
 
     /// <summary>
-    /// v1 简化规则（docs/shader-design.md §5.2.7）：只看 Diffuse.W（MMD 非透过度）。
+    /// v1 简化规则：只看 Diffuse.W（MMD 非透过度）。
     /// </summary>
     public static MaterialRenderType ClassifyMaterial(PmxMaterial m)
     {

@@ -5,7 +5,6 @@ namespace MikuEngine.Core.Models;
 /// <summary>
 /// 引擎侧的材质渲染分类。PMX 本身不区分，由 <c>SkeletalModelConverter</c> 按
 /// <c>PmxMaterial.Diffuse.W</c>（MMD "非透过度"）判定。
-/// 参见 docs/shader-design.md §3.2.2 / §5.2.7。
 /// </summary>
 public enum MaterialRenderType : byte
 {
@@ -41,6 +40,12 @@ public sealed class DrawSegment
     public bool IsDoubleSided;
     public bool EnableEdge;
 
+    /// <summary>PMX 材质旗标 bit2（EnabledDrawShadow）—— 该材质是否写进自阴影 Z 图（铸影侧）。</summary>
+    public bool CastsShadow;
+
+    /// <summary>PMX 材质旗标 bit3（EnabledReceiveShadow）—— 该材质是否接受自阴影（收影侧）。</summary>
+    public bool ReceivesShadow;
+
     /// <summary>本段顶点在绑定姿势下的几何中心（模型空间），用于 Blended 队列排序。</summary>
     public Vector3 Center;
 }
@@ -54,8 +59,8 @@ public sealed class SkeletalModel
     /// <summary>
     /// 交错顶点缓冲步长（字节）。
     ///
-    /// ⚠️ 与 docs 原稿的 48 不同：本仓库的 Model.pmx 有 <b>1099 根骨骼</b>，
-    /// 远超 UNSIGNED_BYTE 能表达的 255，因此骨骼索引必须用 UNSIGNED_SHORT（4 × 2 = 8 字节）：
+    /// 注意：
+    /// 骨骼数通常远超 UNSIGNED_BYTE 能表达的 255，因此骨骼索引必须用 UNSIGNED_SHORT（4 × 2 = 8 字节）：
     ///   aPosition vec3   12 @0
     ///   aNormal   vec3   12 @12
     ///   aUv       vec4   16 @24   (xy=UV, z=EdgeScale, w=DeformType)

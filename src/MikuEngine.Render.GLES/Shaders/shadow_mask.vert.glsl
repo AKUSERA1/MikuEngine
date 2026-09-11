@@ -1,11 +1,7 @@
 #version 310 es
-// 自阴影 Z pass 顶点着色器（PE VS1_Shadow 的光源部分）
-//
-// 内联PCF直接采样 Z 图。
-// 不学PE的 uCameraSpace 双视角分支 —— Z pass 只剩"从光源光栅化"一种。
-//
-// aNormal 声明但未使用：本 pass 与主渲染共用同一个 VAO，attribute 槽位必须对齐
-// （location 1 被主 VS 的 aNormal 占用）；未消费的输入会被编译器优化掉，无运行成本。
+// 影 mask pass 顶点着色器：
+// 从【相机】光栅化模型（gl_Position 用 uViewProj），片元里按【光源】坐标采样 Z 图
+// 得到连续 lit 值 —— mask 是屏幕空间的"自阴影强度场"，供模糊 + 0.5 阈值提取重建光滑边缘。
 precision highp float;
 precision highp int;
 
@@ -25,12 +21,12 @@ layout(std430, binding = 1) buffer SkinMatricesBlock { mat4 uSkinMatrices[]; };
 uniform float uSkinMatBase;
 
 layout(location = 0) in vec3  aPosition;
-layout(location = 1) in vec3  aNormal;
+layout(location = 1) in vec3  aNormal;   // 与主渲染 VAO 对齐，本 pass 不消费
 layout(location = 2) in vec4  aUv;
 layout(location = 3) in uvec4 aJoints;
 layout(location = 4) in vec4  aWeights;
 
-layout(location = 0) out vec2 vUv;
+layout(location = 0) out vec4 vLightPos;
 
 void main()
 {
@@ -50,6 +46,6 @@ void main()
         sp = uSkinMatrices[base] * vec4(aPosition, 1.0);
     }
 
-    vUv = aUv.xy;
-    gl_Position = uFrame.uLightViewProj * sp;
+    vLightPos = uFrame.uLightViewProj * sp;
+    gl_Position = uFrame.uViewProj * sp;
 }

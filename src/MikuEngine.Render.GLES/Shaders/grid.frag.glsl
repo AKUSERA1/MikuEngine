@@ -1,13 +1,10 @@
 #version 310 es
 // 用 highp：vWorldPos 是 ±500 的世界坐标，mediump 在 GLES 上可能是 fp16，
-//    远处格网会出现"不连贯/抖动"。桌面 GL 通常把 mediump 当 fp32，所以桌面看不出问题。
+// 远处格网会出现"不连贯/抖动"。桌面 GL 通常把 mediump 当 fp32，所以桌面看不出问题。
 precision highp float;
 
 // MikuEngine GLES 3.1 —— 迷雾格网地面 片元着色器
-// 由 MikuPlay.Rendering.Vulkan 的 grid.frag 改写而来：
-//   #version 450 → #version 310 es
-//   layout(set=0, binding=0) → layout(binding=0)
-//   新增按导数的分级淡出，消除远处摩尔纹/锯齿（修复一直存在的格网锯齿问题）
+// 按导数的分级淡出，消除远处摩尔纹/锯齿（修复一直存在的格网锯齿问题）
 
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 0) out vec4 outColor;

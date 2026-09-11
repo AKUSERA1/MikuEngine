@@ -1,21 +1,29 @@
-﻿using System.Numerics;
+using System.Numerics;
 using Silk.NET.OpenGL;
 
 namespace MikuEngine.Render.GLES;
 
 /// <summary>
-/// 自阴影 / 床影。对齐 PmxEditor 的三段式：
-///   ① 光照深度图（tec_z / ZSampler）—— 从【光源】视角渲染 z/w，带深度附件
-///   ② 影强度图（tec_selfShadow / ShadowSampler）—— 从【相机】视角光栅化（只有深度用光源的），
-///      每个相机可见片元 16 点采样 ① 判断自己是否被挡住，写出一张【屏幕空间】影强度图
-///   ③ 主渲染按片元自己的屏幕坐标取回 ② ，替换 toon 分支（PS1 L563-586）
+/// 自阴影 / 床影
+///
+/// 对齐 PmxEditor 的光源视角 Z 图，但已删掉 PE 的屏幕空间影强度图（mask）：
+///   1. 光照深度图（tec_z / ZSampler）—— DEPTH_COMPONENT24 深度纹理直挂 depth attachment，
+///      开 LINEAR + COMPARE_REF_TO_TEXTURE + LEQUAL：shader 每次 texture() 硬件对 2×2 texel
+///      做二值深度比较后双线性插值（免费 2×2 PCF）。Z pass 不再写颜色（省整张 32f 颜色图）。
+///   2. （已删除）屏幕空间影强度图 —— 主渲染为内联采样直接用比较采样器消费 1.：
+///      硬边本影 3×3 高斯（阈值提取）、标准 16-tap PCF / 软影 9-tap PCF。
 /// 另有床影（tec_floorShadow），对应 MMD 影模式 2。
 ///
-/// ① 与 ② 的光栅化视角【必须不同】，这是 PE 实现的核心（见 shadow.vert.glsl 的 uCameraSpace）：
-/// 若 ② 也从光源光栅化，只有离光最近的面写得进去，而它们按定义就是受光的，
-/// 相机看得见但被遮挡的面永远读不到自己的判定 → 投影阴影信息整体丢失。
+/// 删 mask 的理由：
+///   不需要 MME 补正型阴影兼容，mask 的唯一价值（供 ExcellentShadow 类后处理读取）不复存在；
+///   内联 PCF 每片元用自己的位置比深度，多模型下不存在 mask 的"读到别人判定"串扰。
+///   收益：每模型 3 pass → 2 pass、省 mask FBO/纹理、省 uCameraSpace 双视角分支。
 ///
 /// MMD 影模式：0=关（默认）/ 1=自阴影 / 2=自阴影+床影
+///
+/// TODO："共享光空间图"的多模型共用 + "稳定区域"（量化/贴 texel 网格）需等
+///   场景/多模型支持落地后再做；当前单模型下 UpdateLight 仍按单个模型包围盒拟合。
+/// TODO：stage/prop 特权化、按光源视锥剔除整模型 —— 同样依赖场景支持。
 /// </summary>
 public sealed unsafe class GlesShadowRenderer : IDisposable
 {
@@ -25,6 +33,15 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         Off = 0,
         SelfShadow = 1,
         SelfShadowAndFloor = 2,
+    }
+
+    /// <summary>影图分辨率档位。改档触发 FBO 延迟重建。</summary>
+    public enum ShadowResolution
+    {
+        R512 = 512,
+        R1024 = 1024,
+        R2048 = 2048,
+        R4096 = 4096,
     }
 
     /// <summary>PE g_selfStrength（fxd L57）。</summary>
@@ -37,13 +54,11 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
     public const float ShadowMargin = 0.003f;
 
     private readonly GlesDevice _device;
-    private readonly int _size = 1024;          // 影图分辨率（正方形）
+    private int _size = 2048;               // 影图分辨率（正方形）
+    private float _e = 16f;                 // 当前正交半宽（UpdateLight 算出；TexelWorld 用）
 
-    private uint _zTex, _zFbo;                  // 光照深度图（R 通道存 z/w）
-    private uint _zDepthRbo;                    // 光照深度图的深度附件（P0-4）
-    private uint _maskTex, _maskFbo;            // 影强度图
-    private uint _maskDepthRbo;                 // 影强度图的深度附件（P0-5）
-    private uint _zProg, _maskProg, _floorProg;
+    private uint _zTex, _zFbo;              // 光照深度图（DEPTH_COMPONENT24）
+    private uint _zProg, _floorProg;
     private uint _floorVao, _floorVbo;
 
     private readonly Dictionary<string, int> _u = new();
@@ -51,20 +66,37 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
     /// <summary>当前影模式，默认关闭。</summary>
     public ShadowMode Mode { get; set; } = ShadowMode.Off;
 
-    /// <summary>本帧算出的光照 ViewProj（Demo 要把它填进 FrameUniforms.Lights）。</summary>
+    /// <summary>本帧算出的光照 ViewProj（Demo 要把它填进 FrameUniforms.LightViewProj）。</summary>
     public Matrix4x4 LightViewProj { get; private set; } = Matrix4x4.Identity;
 
     public bool Enabled => Mode != ShadowMode.Off;
 
-    /// <summary>① 光照深度图（R 通道存 z/w）。调试预览用。</summary>
+    /// <summary>
+    /// 光照深度图（DEPTH_COMPONENT24，比较采样器用）。主渲染绑到 unit 3：
+    /// model.frag / floor_shadow 用 sampler2DShadow 采样（硬件双线性深度比较）。
+    /// 注意：纹理对象上开着 COMPARE_REF_TO_TEXTURE —— 普通 sampler2D 不能采它；
+    /// 调试预览（GlesDebugOverlay）会临时关掉比较模式再恢复。
+    /// </summary>
     public uint ZTexture => _zTex;
 
-    /// <summary>
-    /// ② 影强度图（R 通道：0 受光 ~ 1 全影）。调试预览用。
-    /// ⚠️ 主渲染侧的 <c>uShadowMap</c> 目前【没有】绑定它（P0-1，待第 5 步修复），
-    ///    本属性当前只服务于 <see cref="GlesDebugOverlay"/>。
-    /// </summary>
-    public uint MaskTexture => _maskTex;
+    /// <summary>1/影图边长。主渲染与床影的 PCF 核缩放（单一来源，不再硬编码 1/1024）。</summary>
+    public float Texel => 1f / _size;
+
+    /// <summary>一个影图 texel 覆盖的世界尺寸（= 2 半宽/分辨率）。法线偏移等"按世界 texel 接线"用。</summary>
+    public float TexelWorld => 2f * _e / _size;
+
+    /// <summary>影图分辨率（正方形）。写入触发 FBO 延迟重建。</summary>
+    public int Resolution
+    {
+        get => _size;
+        set
+        {
+            int v = Math.Clamp(value, 512, 4096);
+            if (v == _size) return;
+            _size = v;
+            RecreateTargets();
+        }
+    }
 
     public GlesShadowRenderer(GlesDevice device)
     {
@@ -74,9 +106,6 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         _zProg = device.BuildProgram(
             "MikuEngine.Render.GLES.Shaders.shadow.vert.glsl",
             "MikuEngine.Render.GLES.Shaders.shadow_z.frag.glsl");
-        _maskProg = device.BuildProgram(
-            "MikuEngine.Render.GLES.Shaders.shadow.vert.glsl",
-            "MikuEngine.Render.GLES.Shaders.shadow_strength.frag.glsl");
         _floorProg = device.BuildProgram(
             "MikuEngine.Render.GLES.Shaders.floor_shadow.vert.glsl",
             "MikuEngine.Render.GLES.Shaders.floor_shadow.frag.glsl");
@@ -108,129 +137,125 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         var gl = _device.Gl;
         int s = _size;
 
-        // 光照深度图（RGBA32F；桌面 GL 可渲染，Android 需 EXT_color_buffer_float）
+        // 光照深度图（方案 B）：DEPTH_COMPONENT24 深度纹理直挂 depth attachment，
+        // Z pass 不再写颜色。相比旧版（RGBA32F 颜色 + renderbuffer 深度双份）：
+        //   1. 显存省 16 MB/s（2048²：旧 16(color)+12(rbo)=28 B/px → 新 4 B/px）
+        //   2. 深度精度从 32f 变 24bit 定点 —— 对 0.003 偏置（≈1.5e-4 NDC/级）仍绰绰有余
         _zTex = gl.CreateTexture(TextureTarget.Texture2D);
         gl.BindTexture(TextureTarget.Texture2D, _zTex);
-        gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.Rgba32f, (uint)s, (uint)s, 0,
-            PixelFormat.Rgba, PixelType.Float, (void*)0);
-        SetNearestClamp();
+        gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.DepthComponent24, (uint)s, (uint)s, 0,
+            PixelFormat.DepthComponent, PixelType.UnsignedInt, (void*)0);
+        SetShadowCompareClamp();
+
         _zFbo = gl.CreateFramebuffer();
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, _zFbo);
-        gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0,
+        // 只挂深度附件 —— ES 3.0+ 允许 depth-only FBO（draw buffer 默认 GL_NONE）
+        gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment,
             TextureTarget.Texture2D, _zTex, 0);
-
-        // 深度附件（P0-4 修复）。
-        // GL 规定「FBO 没有深度缓冲时，深度测试视为恒通过」—— 也就是说缺了这个 renderbuffer，
-        // Z pass 里的 Enable(DepthTest)/DepthFunc(Lequal)/DepthMask(true) 全是空操作，
-        // Z 图会退化成"按绘制顺序后写覆盖"的最后一层三角面，而不是深度图（且不报任何错）。
-        // PE 侧对应物是 m_ZStencil = Surface.CreateDepthStencil(...) + ChangeZRenderTarget()。
-        _zDepthRbo = gl.CreateRenderbuffer();
-        gl.BindRenderbuffer(RenderbufferTarget.Renderbuffer, _zDepthRbo);
-        gl.RenderbufferStorage(RenderbufferTarget.Renderbuffer, InternalFormat.DepthComponent24, (uint)s, (uint)s);
-        gl.FramebufferRenderbuffer(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment,
-            RenderbufferTarget.Renderbuffer, _zDepthRbo);
         CheckFramebuffer("Z 图");
-
-        // 影强度图
-        _maskTex = gl.CreateTexture(TextureTarget.Texture2D);
-        gl.BindTexture(TextureTarget.Texture2D, _maskTex);
-        gl.TexImage2D(TextureTarget.Texture2D, 0, InternalFormat.Rgba8, (uint)s, (uint)s, 0,
-            PixelFormat.Rgba, PixelType.UnsignedByte, (void*)0);
-        SetNearestClamp();
-        _maskFbo = gl.CreateFramebuffer();
-        gl.BindFramebuffer(FramebufferTarget.Framebuffer, _maskFbo);
-        gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0,
-            TextureTarget.Texture2D, _maskTex, 0);
-
-        // 影强度图也要深度附件（P0-5 的一半）：它现在从【相机】光栅化，
-        // 必须让"离相机最近的那个片元"胜出 —— 也就是主渲染真正看得见的那张皮。
-        // 没有深度附件时该 pass 是"后写覆盖"，写进去的是绘制顺序决定的随机面。
-        // PE 侧对应物：m_shadowRenderTexture.TargetStencil（DrawSelfShadow 里 ZEnable=true）。
-        _maskDepthRbo = gl.CreateRenderbuffer();
-        gl.BindRenderbuffer(RenderbufferTarget.Renderbuffer, _maskDepthRbo);
-        gl.RenderbufferStorage(RenderbufferTarget.Renderbuffer, InternalFormat.DepthComponent24, (uint)s, (uint)s);
-        gl.FramebufferRenderbuffer(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthAttachment,
-            RenderbufferTarget.Renderbuffer, _maskDepthRbo);
-        CheckFramebuffer("影强度图");
 
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
     }
 
+    private void DestroyTargets()
+    {
+        var gl = _device.Gl;
+        if (_zTex != 0) { gl.DeleteTexture(_zTex); _zTex = 0; }
+        if (_zFbo != 0) { gl.DeleteFramebuffer(_zFbo); _zFbo = 0; }
+    }
+
+    private void RecreateTargets()
+    {
+        DestroyTargets();
+        CreateTargets();
+    }
+
     /// <summary>
-    /// 诊断：FBO complete 检查。缺附件/尺寸不匹配时 GL 只会静默丢弃全部绘制，
-    /// 不查的话表现和"功能没生效"一模一样。
+    /// 诊断：FBO complete 检查。缺附件/尺寸不匹配时 GL 只会静默丢弃全部绘制。
     /// </summary>
     private void CheckFramebuffer(string name)
     {
         var st = _device.Gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
         if (st != GLEnum.FramebufferComplete)
-            Console.WriteLine($"[GlesShadowRenderer] ⚠️ {name} FBO 不完整：{st}");
+            Console.WriteLine($"[GlesShadowRenderer] {name} FBO 不完整：{st}");
         else
             Console.WriteLine($"[GlesShadowRenderer] {name} FBO complete（{_size}²）");
     }
 
-    private void SetNearestClamp()
+    /// <summary>
+    /// Z 图的采样参数（方案 B 的核心）：
+    ///   1. LINEAR —— 比较模式下硬件对 2×2 texel 的比较结果做双线性插值（免费 2×2 PCF）
+    ///   2. COMPARE_REF_TO_TEXTURE + LEQUAL —— shader 里 texture(shadowSampler, vec3(uv, ref))
+    ///     返回 (ref <= s) 的插值结果，即"lit 分数"，与旧版手写 (s >= z) 同义
+    ///   1. CLAMP_TO_EDGE —— 越界采样返回边缘深度（背景=1 ⇒ 永远受光，安全）
+    /// </summary>
+    private void SetShadowCompareClamp()
     {
         var gl = _device.Gl;
-        gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
-        gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
-        // ⚠️ 必须 CLAMP_TO_EDGE：越界采样会返回 0（= 永远在影里），整个模型会变黑
+        gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
         gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
         gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureCompareMode, (int)TextureCompareMode.CompareRefToTexture);
+        gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureCompareFunc, (int)DepthFunction.Lequal);
     }
 
     /// <summary>
-    /// 由光源方向 + 模型包围盒算出光照 ViewProj。
-    /// 用【正交】投影，直接复用 OrbitCamera 的左手系约定。
+    /// 由光源方向 + 模型包围盒算出光照 ViewProj（正交投影，复用 OrbitCamera 的左手系约定）。
+    ///
+    /// reze两件套（锐度 + 时间平滑）：
+    ///   1. 紧视锥：半宽 = AABB 半尺寸在光空间 right/up 上的投影（比包围球紧得多），
+    ///      除以 0.85 给淡出带留位、再 ceil 到整数单位 —— e 稳定 ⇒ texel 量子稳定 ⇒
+    ///      snapping 才有意义。密度目标 ≈ reze 近级联的 64 texels/unit。
+    ///   2. texel snapping：目标点吸附到本级 texel 网格（只量化 right/up 平面，
+    ///      沿光方向不量化 —— 量化它只会让深度跳变）。动画/移动时影边不再"呼吸"。
+    /// 注意：包围盒是绑定姿势的（converter 算好即静态），故每模型调一次即可；
+    /// 若未来改为逐帧姿态包围盒，须每帧调用并保持 1. 的量化稳定。
     /// </summary>
     public void UpdateLight(MikuEngine.Core.Models.SkeletalModel model, Vector3 lightDirection)
     {
         var center = model.BoundsCenter;
-        float radius = MathF.Max(model.BoundsSize.Length() * 0.6f, 15f);
+        var h = model.BoundsSize * 0.5f;                          // AABB 半尺寸
+        float sphereR = MathF.Max(model.BoundsSize.Length() * 0.6f, 15f);
 
         Vector3 dir = Vector3.Normalize(lightDirection);          // 光传播方向
-        Vector3 eye = center - dir * radius * 4f;                 // 退到光的反方向
         Vector3 up = MathF.Abs(Vector3.Dot(dir, Vector3.UnitY)) > 0.95f
             ? Vector3.UnitZ
             : Vector3.UnitY;
 
-        // 用【正交】投影，且视锥必须完全包住模型：
-        // 之前用 fov 15° 的窄角透视，在 6r 距离处视锥半高只有 0.79r，比模型半径还小，
-        // 模型出界部分采不到有效深度（Z 图是 1.0），会导致影判定错乱。
-        float e = MathF.Max(radius * 1.4f, 15f);                  // 正交半宽
-        float dist = radius * 4f;                                 // 眼到模型中心
-        float near = MathF.Max(dist - 2.5f * e, 0.1f);
-        float far = dist + 2.5f * e;
+        // 基向量（与 LookAt 内部一致），供紧视锥投影与 snapping 使用
+        Vector3 f = dir;
+        Vector3 r = Vector3.Normalize(Vector3.Cross(up, f));
+        Vector3 v = Vector3.Normalize(Vector3.Cross(f, r));
 
-        // 约定与 OrbitCamera 完全一致（列主序 / LH / z_ndc ∈ [-1,1]）
-        var view = LookAt(eye, center, up);
-        var proj = Orthographic(e, near, far);
+        // ── 1. 紧视锥：AABB 在光空间平面上的投影半径（正交投影下与深度无关）──────
+        float er = h.X * MathF.Abs(r.X) + h.Y * MathF.Abs(r.Y) + h.Z * MathF.Abs(r.Z);
+        float eu = h.X * MathF.Abs(v.X) + h.Y * MathF.Abs(v.Y) + h.Z * MathF.Abs(v.Z);
+        // 模型边缘 ≤ 0.85（淡出带 0.88→0.96 在模型外），+1 单位余量，ceil 整数稳定量子
+        _e = MathF.Ceiling(MathF.Max(er, eu) / 0.85f) + 1f;
+        float texel = 2f * _e / _size;
+        Console.WriteLine($"[GlesShadowRenderer] 紧视锥：投影半径 er={er:F2} eu={eu:F2} → 半宽 {_e:F0} " +
+                          $"(span {2f * _e:F1})  密度 {_size / (2f * _e):F1} texels/unit @ {_size}²");
 
-        // ⚠️ 顺序必须是 view * proj，不能写 proj * view（P0-2）。
-        //
-        // 原因：Matrix4x4 在本仓库是"列主序 GL 布局的【容器】"，而 System.Numerics 的
-        // operator* 是【行向量语义】—— (p·A)·B == p·(A*B)，即乘号右边后作用。
-        // GLSL 端按列主序读这 16 个 float，等价于用 A^T 做 M·p，于是
-        //     容器里存 proj*view  ⇒ GLSL 实际矩阵 = (P·V)^T = V·P   ← 顺序反了
-        // 数值实测（模型中心 (0,12,0)、e=21、near=7.5、far=112.5）：
-        //     用 proj*view → NDC = (-0.808, -5.938, 69.798)  → 整个模型被裁掉
-        //     用 view*proj → NDC = ( 0.000,  0.000,  ...  )  → 中心归位
-        // OrbitCamera.ComputeViewProj 用自写的 MultiplyColumnMajor(proj, view) 才是等价的
-        // 列主序写法；这里沿用 System.Numerics 语义，两种写法各写各的算法，不要互相照抄注释。
+        // ── 2. texel snapping：目标点吸附到 texel 网格 ─────────────────────
+        float tr = MathF.Round(Vector3.Dot(center, r) / texel) * texel;
+        float tu = MathF.Round(Vector3.Dot(center, v) / texel) * texel;
+        float td = Vector3.Dot(center, f);                        // 沿光方向不量化
+        var target = r * tr + v * tu + f * td;
+
+        // 深度范围按 AABB 沿光方向的投影收紧（z 精度更好），床影地面深度也覆盖在内
+        float ef = h.X * MathF.Abs(f.X) + h.Y * MathF.Abs(f.Y) + h.Z * MathF.Abs(f.Z);
+        float dist = sphereR * 4f;                                // 眼到模型中心（沿用旧距离）
+        float near = MathF.Max(dist - ef * 2f - 4f, 0.1f);
+        float far = dist + ef * 2f + 4f;
+
+        // 注意：顺序必须是 view * proj，不能写 proj * view（已经数值验证）。
+        var view = LookAt(target - f * dist, target, up);
+        var proj = Orthographic(_e, near, far);
         LightViewProj = view * proj;
     }
 
-    /// <summary>
-    /// 左手系正交投影：z_view ∈ [near, far] → z_ndc ∈ [-1, 1]。
-    /// 列主序内存布局（与 <see cref="OrbitCamera"/> / model.vert 的 mat4 约定一致）。
-    ///
-    /// ⚠️ M33 是 +2/(far-near)，不是 GL 教科书里的 -2/(f-n)（P0-3）。
-    ///    那个负号配的是【右手系】视空间（相机看向 -Z，前方 z_view &lt; 0）；
-    ///    而本仓 LookAt（以及 MMD/PE）是【左手系】，前方 z_view &gt; 0。
-    ///    照抄负号会让 z_ndc = -2z/(f-n) - (n+f)/(f-n)，解 z_ndc ∈ [-1,1] 得
-    ///    z_view ∈ [-far, -near] —— 裁剪体整个落在光源相机【背后】，
-    ///    可见几何（z_view ≈ 60）全部被近/远平面裁掉，Z 图与影强度图都光栅化不出任何东西。
-    /// </summary>
+    /// <summary>左手系正交投影：z_view ∈ [near, far] → z_ndc ∈ [-1, 1]。列主序内存。</summary>
     private static Matrix4x4 Orthographic(float halfExtent, float near, float far)
     {
         float ri = 1f / (far - near);
@@ -249,7 +274,6 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         Vector3 r = Vector3.Normalize(Vector3.Cross(up, f));
         Vector3 v = Vector3.Normalize(Vector3.Cross(f, r));
 
-        // 列主序语义；System.Numerics 的字段序与 GLSL mat4 内存一致
         return new Matrix4x4(
             r.X, v.X, f.X, 0f,
             r.Y, v.Y, f.Y, 0f,
@@ -258,7 +282,8 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
     }
 
     /// <summary>
-    /// 渲染 Z 图与影强度图。必须在 model.Draw 之前调用（它绑定的 UBO/SSBO 与主渲染一致）。
+    /// 渲染光照深度图（Z 图）。必须在 model.PrepareFrame 之后、model.Draw 之前调用
+    /// （它复用的 UBO/SSBO 与主渲染一致；帧首统一上传由 PrepareFrame 完成，见前述）。
     /// </summary>
     public void RenderShadowMaps(GlesDevice device, GlesModelRenderer model, int viewW, int viewH)
     {
@@ -269,27 +294,32 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         AttachModelBuffers(model.FrameUbo, model.SkinSsbo);
         gl.BindVertexArray(model.Vao);            // 顶点/索引来自模型的 VAO
 
-        // ── ① 光照深度图 ────────────────────────────────────────────────
+        // ── 1. 光照深度图（depth-only：无颜色附件，只需清深度）──────────
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, _zFbo);
         gl.Viewport(0, 0, (uint)_size, (uint)_size);
-        gl.ClearColor(1f, 1f, 1f, 1f);                 // 空处 z=1（PE: ZSampler 默认 1 → 不在影里）
-        gl.ClearDepth(1f);                             // 显式，不依赖驱动默认值（GL 默认也是 1，但别赌）
-        gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+        gl.ClearDepth(1f);                             // 空处 z=1（PE: ZSampler 默认 1 → 不在影里）
+        gl.Clear(ClearBufferMask.DepthBufferBit);
         gl.Enable(EnableCap.DepthTest);
         gl.DepthFunc(DepthFunction.Lequal);
         gl.DepthMask(true);
         gl.Disable(EnableCap.Blend);
         gl.Disable(EnableCap.CullFace);                // 影图不剔除，避免单面材质投不出影
-                                                       // （有深度测试后，光背面即使被光栅化也会输给近面）
 
         gl.UseProgram(_zProg);
         BindCommon(_zProg);
-        gl.Uniform1(U(_zProg, "uCameraSpace"), 0f);   // ① 从光源光栅化
         gl.Uniform1(U(_zProg, "uSkinMatBase"), (float)baseOffset);
         int texUnit = 0; gl.Uniform1(U(_zProg, "uDiffuseTex"), texUnit);
+
+        // 光栅化斜率偏置：factor=斜率 1.5 / units=常数 2。
+        // 正值把 caster 深度推离光源 ⇒ 受光判定更容易 ⇒ 消斜面 acne；与法线偏移（接收侧）、
+        // 比较侧余量（「常数底 + 按面朝向的斜率缩放」，见 model.frag.glsl）分工。
+        gl.Enable(EnableCap.PolygonOffsetFill);
+        gl.PolygonOffset(1.5f, 2f);
+
         foreach (var seg in m.Segments)
         {
             if (seg.IndexCount <= 0) continue;
+            if (!seg.CastsShadow) continue;            // PMX 材质旗标 bit2（EnabledDrawShadow）
             gl.Uniform1(U(_zProg, "uEnableTexture"), seg.EnableTexture ? 1f : 0f);
             gl.ActiveTexture(TextureUnit.Texture0);
             gl.BindTexture(TextureTarget.Texture2D, model.Textures.Get(seg.DiffuseTextureId));
@@ -297,44 +327,11 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
                 (void*)(seg.IndexStart * sizeof(uint)));
         }
 
-        // ── ② 影强度图 ──────────────────────────────────────────────────
-        // 从【相机】光栅化（P0-5 修复），写出的是一张【屏幕空间】的影强度图。
-        // 主渲染按片元自己的屏幕坐标取回它 —— 与 PE PS1 的
-        //   uv = getShadowTexPos(p_in.Depth)   // Depth = 相机裁剪坐标
-        // 是同一件事。
-        gl.BindFramebuffer(FramebufferTarget.Framebuffer, _maskFbo);
-        gl.ClearColor(0f, 0f, 0f, 1f);                 // 空处 0 = 受光
-        gl.ClearDepth(1f);
-        gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
-        gl.Enable(EnableCap.DepthTest);
-        gl.DepthFunc(DepthFunction.Lequal);
-        gl.DepthMask(true);
-
-        gl.UseProgram(_maskProg);
-        BindCommon(_maskProg);
-        gl.Uniform1(U(_maskProg, "uCameraSpace"), 1f);   // ② 从相机光栅化
-        gl.Uniform1(U(_maskProg, "uSkinMatBase"), (float)baseOffset);
-        texUnit = 0; gl.Uniform1(U(_maskProg, "uDiffuseTex"), texUnit);
-        int tu = 3; gl.Uniform1(U(_maskProg, "uShadowZMap"), tu);
-        gl.Uniform1(U(_maskProg, "uShadowTexel"), 1f / _size);
-        gl.ActiveTexture(TextureUnit.Texture3);
-        gl.BindTexture(TextureTarget.Texture2D, _zTex);
-
-        foreach (var seg in m.Segments)
-        {
-            if (seg.IndexCount <= 0) continue;
-            gl.Uniform1(U(_maskProg, "uEnableTexture"), seg.EnableTexture ? 1f : 0f);
-            gl.ActiveTexture(TextureUnit.Texture0);
-            gl.BindTexture(TextureTarget.Texture2D, model.Textures.Get(seg.DiffuseTextureId));
-            gl.DrawElements(PrimitiveType.Triangles, (uint)seg.IndexCount, DrawElementsType.UnsignedInt,
-                (void*)(seg.IndexStart * sizeof(uint)));
-        }
+        gl.Disable(EnableCap.PolygonOffsetFill);
 
         // ── 还原 ───────────────────────────────────────────────────────
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         gl.Viewport(0, 0, (uint)viewW, (uint)viewH);
-        gl.ClearColor(GlesDevice.DefaultClearColor.r, GlesDevice.DefaultClearColor.g,
-                      GlesDevice.DefaultClearColor.b, GlesDevice.DefaultClearColor.a);
         gl.ActiveTexture(TextureUnit.Texture0);
     }
 
@@ -347,39 +344,32 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
     }
 
     /// <summary>
-    /// 读回两张中间 RT 并打印统计量（修复计划 · 步骤 1 的量化部分）。
-    ///
-    /// 为什么要做：自阴影这类多 pass 功能一旦"没生效"，最终画面只是"没变暗"，
-    /// 无法区分是哪一段断了 —— 纹理没绑定 / FBO 没附件 / 矩阵把几何裁光了，
-    /// 三种症状完全一样，而且都不报 GL 错。所以必须把中间结果量化出来。
-    ///
-    /// 判读方法：
-    ///   · ① Z 图：覆盖率应≈模型在光源视角下的剪影占比（本仓模型约 3~5%），
-    ///     z 应明显小于 1.000（1.000 = Clear 的空值）。覆盖 0% / z 恒 1.000 ⇒ 该 pass 什么都没画。
-    ///   · ② 影强度图：非零比例应与"模型在屏幕上的覆盖"同量级，且应有连续灰度。
-    ///     远小于 Z 图覆盖 ⇒ 只写了预期的一小部分（典型：在光源空间光栅化，见 P0-5）。
+    /// 读回光照深度图并打印统计量（只有 Z 图，影强度图已删除）。
+    /// 判读：覆盖率应≈模型在光源视角下的剪影占比（本仓模型约 3~5%），
+    /// z 应明显小于 1.000（1.000 = Clear 空值）。覆盖 0% / z 恒 1.000 ⇒ Z pass 无产出。
     /// </summary>
     public void DumpMapStats()
     {
         if (Mode == ShadowMode.Off)
         {
-            Console.WriteLine("[Shadow] 影模式 = 0（关），中间 RT 未渲染，统计无意义");
+            Console.WriteLine("[Shadow] 影模式 = 0（关），Z 图未渲染，统计无意义");
             return;
         }
 
         var gl = _device.Gl;
         int n = _size * _size;
 
-        var z = new float[n * 4];
+        // 深度纹理读回：DEPTH_COMPONENT 格式（旧版读颜色的 RGBA 已不适用）
+        var z = new float[n];
         fixed (float* p = z)
         {
             gl.BindTexture(TextureTarget.Texture2D, _zTex);
-            gl.GetTexImage(TextureTarget.Texture2D, 0, PixelFormat.Rgba, PixelType.Float, p);
+            gl.GetTexImage(TextureTarget.Texture2D, 0, PixelFormat.DepthComponent, PixelType.Float, p);
         }
         int covered = 0;
         float zmin = float.MaxValue, zmax = float.MinValue;
         double zsum = 0;
-        for (int i = 0; i < z.Length; i += 4)
+        for (int i = 0; i < n; i++)
         {
             float v = z[i];
             if (v < 0.99f)
@@ -392,23 +382,8 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         }
         float zmean = covered > 0 ? (float)(zsum / covered) : 1f;
 
-        var m = new byte[n * 4];
-        fixed (byte* p = m)
-        {
-            gl.BindTexture(TextureTarget.Texture2D, _maskTex);
-            gl.GetTexImage(TextureTarget.Texture2D, 0, PixelFormat.Rgba, PixelType.UnsignedByte, p);
-        }
-        int nz = 0, peak = 0;
-        for (int i = 0; i < m.Length; i += 4)
-        {
-            if (m[i] > 0) nz++;
-            if (m[i] > peak) peak = m[i];
-        }
-
         Console.WriteLine($"[Shadow] ① Z 图     : 覆盖 {covered * 100.0 / n:F1}%  z∈[{zmin:F3}, {zmax:F3}]  覆盖区均值 {zmean:F3}" +
                           "   （1.000 = Clear 空值；覆盖 0% 即该 pass 无产出）");
-        Console.WriteLine($"[Shadow] ② 影强度图 : 非零 {nz * 100.0 / n:F2}%  峰值 {peak}/255" +
-                          "   （0 = 受光，255 = 全影；应覆盖模型屏幕投影的大部分）");
     }
 
     private uint _modelFrameUbo;
@@ -421,23 +396,10 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         _modelSkinSsbo = skinSsbo;
     }
 
-    /// <summary>床影（MMD 影模式 2）。</summary>
-    /// <remarks>
-    /// 必须**自己设置渲染状态**，不能沿用上一个 pass 的残留 —— 这正是 PE 的做法：
-    /// PE 的 <c>tec_floorShadow</c> 在 fxd 里写明了
-    ///     <c>AlphaBlendEnable = True; SrcBlend = SRCALPHA; DestBlend = INVSRCALPHA;</c>
-    /// 而 C# 侧 <c>DrawModel_Shadow</c> 另外做了 <c>SetRenderState(ZWRITEENABLE, false)</c>。
-    /// 两者合起来才是一块"半透明贴地 overlay"：只混合、不写深度。
-    ///
-    /// 之前本方法一个状态都没设，继承了 <c>model.Draw</c> 收尾时的「Blend 关 / DepthMask 开」，
-    /// 于是有两处错：
-    ///   ① 混合关闭 ⇒ 床影被当成**不透明**块写进去（alpha 被忽略），
-    ///      画面上是一整块 <c>LightColor*0.5</c> 的灰板而不是影；
-    ///   ② 深度写入 ⇒ 与同样位于 y=0 的坐标格网**共面争深度**，
-    ///      后画的格网用 Lequal 与床影互相覆盖，出现闪烁斑纹（z-fight）。
-    /// 关掉深度写入后，床影不参与任何共面深度比较，z-fight 从机制上消失。
-    /// （调用顺序也要配合：格网先画、床影后画，见 Demo 的 Render。）
-    /// </remarks>
+    /// <summary>
+    /// 床影（MMD 影模式 2）。必须**自己设置渲染状态**，不沿用上一个 pass 的残留
+    /// （PE tec_floorShadow 的 AlphaBlend/SRCALPHA/INVSRCALPHA + DrawModel_Shadow 的 ZWRITEENABLE=false）。
+    /// </summary>
     public void DrawFloor(GlesDevice device, Vector3 lightColor)
     {
         if (Mode != ShadowMode.SelfShadowAndFloor) return;
@@ -455,6 +417,7 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         int tu = 3; gl.Uniform1(U(_floorProg, "uShadowZMap"), tu);
         gl.ActiveTexture(TextureUnit.Texture3);
         gl.BindTexture(TextureTarget.Texture2D, _zTex);
+        gl.Uniform1(U(_floorProg, "uShadowTexel"), Texel);   // 单一来源
         gl.Uniform4(U(_floorProg, "uLightColor"), lightColor.X, lightColor.Y, lightColor.Z, 1f);
         gl.Uniform1(U(_floorProg, "uFloorStrength"), FloorStrength);
 
@@ -473,14 +436,8 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
     public void Dispose()
     {
         var gl = _device.Gl;
-        gl.DeleteTexture(_zTex);
-        gl.DeleteFramebuffer(_zFbo);
-        gl.DeleteRenderbuffer(_zDepthRbo);
-        gl.DeleteTexture(_maskTex);
-        gl.DeleteFramebuffer(_maskFbo);
-        gl.DeleteRenderbuffer(_maskDepthRbo);
+        DestroyTargets();
         gl.DeleteProgram(_zProg);
-        gl.DeleteProgram(_maskProg);
         gl.DeleteProgram(_floorProg);
         gl.DeleteVertexArray(_floorVao);
         gl.DeleteBuffer(_floorVbo);

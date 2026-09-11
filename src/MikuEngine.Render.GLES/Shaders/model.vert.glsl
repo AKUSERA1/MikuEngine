@@ -2,17 +2,12 @@
 
 // MikuEngine GLES 3.1 —— PMX 模型主渲染 顶点着色器（Phase 0 / 0.5）
 //
-// 光照部分严格照抄 PmxEditor 的 fxd_decoded.txt：
+// 光照部分严格复刻 PmxEditor 的 fxd_decoded.txt：
 //   PhongColor    L291-307
 //   调用点 + 非透过度赋值  L451-463（其中 L462-463: v_out.Color.w = Material_Diffuse.w）
 //   vcol 关、light 开时：v_out.Color = PhongColor(phong_in) + BaseAmbient
 //   Sphere UV     L437-438
 //   ToonCf        L480-485
-//
-// 与 docs 原稿的差异（审计后修正）：
-//   1. aJoints 用 UNSIGNED_SHORT ×4（本模型 1099 骨，UNSIGNED_BYTE 装不下）
-//   2. aWeights 声明为 vec4（normalized 属性硬件自动 ÷255），不是 uvec4
-//   3. 顶点着色器用 highp —— 世界空间骨骼运算用 mediump 会抖
 
 precision highp float;
 precision highp int;
@@ -30,19 +25,20 @@ layout(binding = 0) uniform FrameBlock {
 } uFrame;
 
 // ── 蒙皮矩阵 SSBO (binding 1) ───────────────────────────────────────────
-// 1099 骨 × 64 B ≈ 70 KB，远超 UBO 的 16 KB 最小保证 —— 这正是选 SSBO 的原因。
+// 1024 骨 × 64 B ≈ 65 KB，远超 UBO 的 16 KB 最小保证 —— 这正是选 SSBO 的原因。
 layout(std430, binding = 1) buffer SkinMatricesBlock {
     mat4 uSkinMatrices[];
 };
 
 // ── per-draw uniforms ───────────────────────────────────────────────────
-// ⚠️ 全部用 float：C# 侧统一走 glUniform1f。若这里声明成 int 而上传用 1f，
-//    会触发 GL_INVALID_OPERATION 且 uniform 保持默认值 0 —— 纹理就会整体失效。
+// 全部用 float：C# 侧统一走 glUniform1f。若这里声明成 int 而上传用 1f，
+// 则会触发 GL_INVALID_OPERATION 且 uniform 保持默认值 0 —— 纹理就会整体失效。
 uniform float uSkinMatBase;      // 当前角色在 SSBO 里的骨骼起点
 uniform vec4  uMaterialDiffuse;  // rgb = 材质色, a = MMD 非透过度
 uniform vec4  uMaterialSpecular;
 uniform float uMaterialShininess;
 uniform vec4  uMaterialAmbient;
+uniform float uNormalOffset;     // 法线偏移偏置（世界单位；demo 按 1.5×世界texel 接线）
 
 layout(location = 0) in vec3  aPosition;
 layout(location = 1) in vec3  aNormal;
@@ -55,7 +51,7 @@ layout(location = 1) out vec4  vColor;
 layout(location = 2) out vec2  vUv;
 layout(location = 3) out vec2  vUvSphere;
 layout(location = 4) out float vToonV;
-layout(location = 6) out vec4  vCameraClip;   // 相机裁剪坐标：自阴影按【屏幕】坐标取回影强度图
+layout(location = 6) out vec4  vLightPos;     // 光源裁剪坐标：主渲染内联 PCF 采样 Z 图用（阶段 3）
 
 void main()
 {
@@ -120,8 +116,12 @@ void main()
     // ToonCf（PE L480-485）：dot(n, LightDirect) * 0.5 + 0.5
     vToonV = dot(nWorld, normalize(uFrame.uLightDirection.xyz)) * 0.5 + 0.5;
 
-    // 相机裁剪坐标（= gl_Position）：影强度图是屏幕空间的，主渲染要按【自己的屏幕位置】取回它
-    vCameraClip = uFrame.uViewProj * sp;
+    // 光源裁剪坐标（= uLightViewProj * sp）：内联 PCF 用它算光空间 uv + z 直接采样 Z 图。
+    // 阶段 3 起不再有屏幕空间影强度图，也就不需要相机裁剪坐标了。
+    // 法线偏移偏置（reze §2 #5）：接收位置沿世界法线推离表面 —— 弧面（脸/裙内）的 acne
+    // 由它 + Z pass 斜率偏置共同消化；比较侧的余量自阶段 7 起改为「常数底 + 按面朝向的
+    // 斜率缩放」（见 model.frag.glsl），不再是 PE 的全屏常数 0.003。
+    vLightPos = uFrame.uLightViewProj * vec4(pw + nWorld * uNormalOffset, 1.0);
 
-    gl_Position = vCameraClip;
+    gl_Position = uFrame.uViewProj * sp;
 }

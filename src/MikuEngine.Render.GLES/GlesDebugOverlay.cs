@@ -3,18 +3,14 @@ using Silk.NET.OpenGL;
 namespace MikuEngine.Render.GLES;
 
 /// <summary>
-/// 只读调试预览（修复计划 · 步骤 1）。
+/// 只读调试预览。
 ///
 /// 自阴影这类多 pass 功能"没生效"时，肉眼看最终画面无法区分是哪一段断了
 /// （纹理没绑定 / FBO 没附件 / 矩阵错，三种症状都是"画面没变化"，都不报 GL 错）。
 /// 所以先把中间 RT 直接画到屏幕上，作为每一步修复的验收判据。
 ///
-/// 显示内容：
-///   · <see cref="View.ZMap"/>       —— ① 光照深度图（R 通道，1.0 = 空/远，模型处应更暗）
-///   · <see cref="View.ShadowMask"/> —— ② 影强度图（R 通道，0 = 受光，1 = 全影）
-///   · <see cref="View.Both"/>       —— 左半 Z 图 / 右半 影强度图
-///
-/// 不参与正式渲染：Demo 里按 Z 循环切换，Off 时完全不产生绘制调用。
+/// 只有 Z 图（光照深度图）：屏幕空间影强度图已删除、主渲染改为内联 PCF。
+/// 因此这里只预览 Z 图，Off 时完全不产生绘制调用。
 /// </summary>
 public sealed class GlesDebugOverlay : IDisposable
 {
@@ -22,8 +18,6 @@ public sealed class GlesDebugOverlay : IDisposable
     {
         Off = 0,
         ZMap = 1,
-        ShadowMask = 2,
-        Both = 3,
     }
 
     private readonly GlesDevice _device;
@@ -55,17 +49,17 @@ public sealed class GlesDebugOverlay : IDisposable
         _vao = gl.CreateVertexArray();
     }
 
-    /// <summary>Off → ZMap → ShadowMask → Both → Off。</summary>
+    /// <summary>Off → ZMap → Off。</summary>
     public View Cycle()
     {
-        Current = (View)(((int)Current + 1) % 4);
+        Current = Current == View.Off ? View.ZMap : View.Off;
         return Current;
     }
 
     /// <summary>
-    /// 把中间 RT 画到屏幕。必须在所有 3D 绘制（模型 / 影图 / 格网）之后调用。
+    /// 把光照深度图（Z 图）画到屏幕。必须在所有 3D 绘制（模型 / 影图 / 格网）之后调用。
     /// </summary>
-    public void Render(uint zTex, uint maskTex)
+    public void Render(uint zTex)
     {
         if (Current == View.Off) return;
 
@@ -79,25 +73,22 @@ public sealed class GlesDebugOverlay : IDisposable
         gl.UseProgram(_program);
         gl.BindVertexArray(_vao);
         gl.Uniform1(_locTex, 0);
-        gl.Uniform1(_locChannel, 0f);      // Z 图 / 影强度图都只用 R
+        gl.Uniform1(_locChannel, 0f);      // Z 图只取 R
         gl.Uniform1(_locGain, Gain);
         gl.ActiveTexture(TextureUnit.Texture0);
 
-        bool both = Current == View.Both;
+        // 方案 B：Z 图是 DEPTH_COMPONENT24 且纹理对象上开着 COMPARE_REF_TO_TEXTURE，
+        // 普通 sampler2D 采比较纹理是无效操作。预览时临时关掉比较模式（LINEAR 保留，
+        // 深度值照常可滤波），画完立刻恢复 —— 恢复与关闭在同一函数内成对，不会泄漏。
+        gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureCompareMode,
+            (int)TextureCompareMode.None);
 
-        if (Current == View.ZMap || both)
-        {
-            gl.Uniform4(_locRect, -1f, -1f, both ? 0f : 1f, 1f);
-            gl.BindTexture(TextureTarget.Texture2D, zTex);
-            gl.DrawArrays(PrimitiveType.Triangles, 0, 6);
-        }
+        gl.Uniform4(_locRect, -1f, -1f, 1f, 1f);
+        gl.BindTexture(TextureTarget.Texture2D, zTex);
+        gl.DrawArrays(PrimitiveType.Triangles, 0, 6);
 
-        if (Current == View.ShadowMask || both)
-        {
-            gl.Uniform4(_locRect, both ? 0f : -1f, -1f, 1f, 1f);
-            gl.BindTexture(TextureTarget.Texture2D, maskTex);
-            gl.DrawArrays(PrimitiveType.Triangles, 0, 6);
-        }
+        gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureCompareMode,
+            (int)TextureCompareMode.CompareRefToTexture);
 
         gl.BindVertexArray(0);
         gl.ActiveTexture(TextureUnit.Texture0);

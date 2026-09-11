@@ -5,7 +5,7 @@ using System.Text;
 namespace MikuEngine.Core.Models;
 
 /// <summary>
-/// PMX 二进制文件解析器。忠实移植自 babylon-mmd 的 <c>pmxReader</c>（行序/偏移/类型完全一致）。
+/// PMX 二进制文件解析器。移植自 babylon-mmd 的 <c>pmxReader</c>（行序/偏移/类型完全一致）。
 /// 纯托管实现，无平台依赖，可在单元测试中直接跑。
 /// </summary>
 public static class PmxParser

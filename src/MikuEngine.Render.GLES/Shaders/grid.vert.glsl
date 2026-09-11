@@ -1,10 +1,6 @@
 #version 310 es
 
 // MikuEngine GLES 3.1 —— 迷雾格网地面 顶点着色器
-// 由 MikuPlay.Rendering.Vulkan 的 grid.vert 改写而来：
-//   #version 450 → #version 310 es
-//   layout(set=0, binding=0) → layout(binding=0)（GLES 3.1 无 descriptor set）
-//   移除 GL_ARB_separate_shader_objects 扩展声明
 
 layout(location = 0) in vec3 aPos;
 

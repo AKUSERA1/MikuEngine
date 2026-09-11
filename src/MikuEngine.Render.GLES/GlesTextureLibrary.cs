@@ -9,7 +9,7 @@ namespace MikuEngine.Render.GLES;
 /// <summary>
 /// 纹理库。id 0 恒为 1×1 白色，作为"加载失败"的兜底，调用方无需判空。
 ///
-/// ⚠️ V 轴处理（重要，与早期设计稿相反）：
+/// 注意：V 轴处理：
 /// PMX 的 UV、以及 PmxEditor 里所有程序化 UV（Sphere / Toon）都是按
 /// <b>D3D9 左上原点</b> 约定写的。GL 上传时数据行序与 D3D9 一致
 /// （第 0 行 → 采样坐标 v=0），因此<b>按文件行序原样上传即可复现 PmxEditor 的结果</b>，
