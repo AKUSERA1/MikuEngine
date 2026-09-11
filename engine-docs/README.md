@@ -10,22 +10,23 @@
 ## 模块分层
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  平台层                                                  │
-│  Demo (GLFW) · Android Activity · iOS UIView            │
-│  职责：窗口/上下文 + 原生输入 API → Engine 层一行转发       │
-├─────────────────────────────────────────────────────────┤
-│  Engine 层  MikuEngine.Engine                            │
-│  OrbitInputController（跨平台手势识别 + 灵敏度）             │
-├─────────────────────────────────────────────────────────┤
-│  Core 层  MikuEngine.Core                               │
-│  OrbitCamera · PmxParser · MmdMath                      │
-│  职责：纯数学 / 纯数据，零平台依赖                           │
-├─────────────────────────────────────────────────────────┤
-│  Render 层  MikuEngine.Render.GLES                       │
-│  GlesDevice · GlesGridRenderer · GLSL Shaders            │
-│  职责：OpenGL ES 3.1 渲染（GLES 后端唯一，桌面自动加载 GL）  │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  平台层                                                               │
+│  Demo (GLFW) · Android Activity · iOS UIView                         │
+│  职责：窗口/上下文 + 原生输入 API → Engine 层一行转发                  │
+├──────────────────────────────────────────────────────────────────────┤
+│  Engine 层  MikuEngine.Engine                                         │
+│  OrbitInputController（跨平台手势识别 + 灵敏度）                        │
+├──────────────────────────────────────────────────────────────────────┤
+│  Core 层  MikuEngine.Core                                            │
+│  OrbitCamera · MmdMath · PmxParser · SkeletalModel                    │
+│  职责：纯数学 / 纯数据，零平台依赖                                        │
+├──────────────────────────────────────────────────────────────────────┤
+│  Render 层  MikuEngine.Render.GLES                                    │
+│  GlesDevice · GlesGridRenderer · GlesModelRenderer ·                  │
+│  GlesShadowRenderer · GlesTextureLibrary · GlesSkinMatricesBuffer     │
+│  职责：OpenGL ES 3.1 渲染（GLES 后端唯一，桌面自动加载 GL）             │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 依赖方向（单向）：`Core ← Engine ← Render.GLES`，平台层引用 Engine。
@@ -47,8 +48,8 @@
 |---|---|
 | [坐标系约定](core/coordinate-system.md) | 左手 / Y-up / +Z-forward / 列主序矩阵，**必读** |
 | [OrbitCamera API](core/orbit-camera.md) | 轨道相机的构造、属性、矩阵输出方法 |
-| PMX 模型解析 🚧 | 待实现 |
-| MMD 数学工具 🚧 | 待实现 |
+| [PMX 模型解析](core/pmx-parser.md) | PmxParser · PmxModel · SkeletalModel · SkeletalModelConverter |
+| [MMD 数学工具](core/mmd-math.md) | MmdMath：YXZ 欧拉角 ↔ 四元数转换 |
 
 ### ③ Engine 模块
 
@@ -62,26 +63,31 @@
 |---|---|
 | [GlesDevice](render-gles/gles-device.md) | GL 上下文管理、帧缓冲状态、资源生命周期 |
 | [GlesGridRenderer](render-gles/grid-renderer.md) | 网格地面渲染（雾色淡出） |
+| [GlesModelRenderer](render-gles/gles-model-renderer.md) | PMX 模型渲染管线：蒙皮、材质段、轮廓线、自阴影 |
+| [GlesShadowRenderer](render-gles/gles-shadow-renderer.md) | 自阴影 Z 图 + 床影：紧视锥 / texel snapping / 多风格软影 |
+| [渲染辅助组件](render-gles/gles-support.md) | GlesTextureLibrary · GlesSkinMatricesBuffer · GlesDebugOverlay |
 
 ### ⑤ 平台集成
 
 | 文档 | 说明 |
 |---|---|
 | [桌面 GLFW 集成](platform-integration/desktop-glfw.md) | 窗口创建、GLFW 鼠标回调 → Engine 层转发 |
-| Android 集成 🚧 | 待实现 |
-| iOS 集成 🚧 | 待实现 |
+| [Android 集成](platform-integration/android.md) | Activity + View.OnTouchListener + EGL 上下文（伪代码骨架） |
 
 ### ⑥ 未来模块
 
 | 模块 | 状态 |
 |---|---|
 | MikuEngine.Physics | 🚧 物理引擎移植（TypeScript → C#） |
-| Toon / PBR Shader | 🚧 PMX 模型渲染管线 |
-| 骨骼动画 / Morph | 🚧 |
+| Morph 动画 | 🚧 |
+| SDEF 球形变形 | 🚧 |
+| 共享光空间 / 多模型 | 🚧 |
 
 ---
 
 ## 典型使用流程
+
+### 流程 A：纯网格预览（入门）
 
 ```csharp
 // 1. 创建相机
@@ -90,13 +96,39 @@ var camera = new OrbitCamera(alpha: π/4, beta: π/3, radius: 100, target: Vecto
 // 2. 创建输入控制器（调用方只传 enabled，平台层自动转发）
 var input = new OrbitInputController(camera, enabled: true);
 
-// 3. 平台层做最薄的一层转发（见 platform-integration/ 章节）
-//    GLFW / Android View.OnTouchListener → input.OnPointerDown/Move/Up / OnScroll
-
-// 4. 每帧：
+// 3. 每帧：
 camera.Aspect = viewportWidth / (float)viewportHeight;
 camera.ComputeViewProj(viewProjSpan);
-// → 把 viewProjSpan 喂给 Render 层的 UBO
+grid.Draw(viewProjSpan);  // GlesGridRenderer
+```
+
+### 流程 B：加载并渲染 PMX 模型
+
+```csharp
+// 1. 从磁盘加载（一步完成 PMX 解析 + SkeletalModel 转换 + 纹理上传 + 自阴影预处理）
+var modelRenderer = GlesModelRenderer.LoadFromFile(device, "path/to/model.pmx");
+
+// 2. 每帧（简化版，完整流程见 model-renderer 文档）
+camera.Aspect = width / (float)height;
+Span<float> viewProj = stackalloc float[16];
+camera.ComputeViewProj(viewProj);
+
+// 自阴影（可选）
+shadowRenderer.UpdateLight(modelRenderer.Model, lightDirection);
+frame.LightViewProj = shadowRenderer.LightViewProj;
+
+// 帧首统一准备
+modelRenderer.PrepareFrame(in frame);
+
+// Z pass（光照深度图）
+shadowRenderer.RenderShadowMaps(device, modelRenderer, width, height);
+
+// 主渲染
+modelRenderer.Draw(in frame, toonMode: 1f);
+
+// 床影（MMD 影模式 2）
+if (shadowRenderer.Enabled)
+    shadowRenderer.DrawFloor(device, frame.LightColor);
 ```
 
 详细用法见各子文档。
