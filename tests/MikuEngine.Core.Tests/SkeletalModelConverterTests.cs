@@ -410,46 +410,117 @@ public class SkeletalModelConverterTests
         var pmx = LoadPmx();
         var model = SkeletalModelConverter.Convert(pmx);
 
-        var byIndex = model.VertexMorphs.ToDictionary(m => m.MorphIndex);
-        int checkedMorphs = 0;
+        int checkedMorphs = AssertMorphTablesMatchPmx(pmx, model, "Alu");
+
+        Assert.True(checkedMorphs > 0, "测试模型应含顶点 morph");
+    }
+
+    [Fact]
+    public void MorphTables_MatchPmx_AcrossAllTestModels()
+    {
+        foreach (var path in PmxParserTests.AllModels)
+        {
+            var pmx = PmxParser.Parse(File.ReadAllBytes(path));
+            var model = SkeletalModelConverter.Convert(pmx);
+            AssertMorphTablesMatchPmx(pmx, model, Path.GetFileName(path));
+        }
+    }
+
+    /// <summary>
+    /// 逐条比对顶点 / UV / 骨 morph 的稀疏表与 PMX 源数据（含越界过滤后的重排顺序）。
+    /// 返回校验过的顶点 morph 条数。
+    /// </summary>
+    private static int AssertMorphTablesMatchPmx(PmxModel pmx, SkeletalModel model, string tag)
+    {
+        var vertexTables = model.VertexMorphs.ToDictionary(m => m.MorphIndex);
+        var uvTables = model.UvMorphs.ToDictionary(m => m.MorphIndex);
+        var boneTables = model.BoneMorphs.ToDictionary(m => m.MorphIndex);
+        int checkedVertex = 0;
 
         for (int i = 0; i < pmx.Morphs.Length; i++)
         {
             var src = pmx.Morphs[i];
-            if (src.Type != PmxMorphType.Vertex) continue;
-
-            var indices = src.Indices!;
-            var positions = src.Positions!;
-
-            int valid = 0;
-            for (int k = 0; k < indices.Length; k++)
-                if ((uint)indices[k] < (uint)model.VertexCount) valid++;
-
-            if (!byIndex.TryGetValue(i, out var sparse))
+            switch (src.Type)
             {
-                Assert.Equal(0, valid);   // 没有运行时项 ⇒ 源数据里没有任何合法索引
-                continue;
+                case PmxMorphType.Vertex:
+                {
+                    var indices = src.Indices!;
+                    var positions = src.Positions!;
+                    int valid = 0;
+                    for (int k = 0; k < indices.Length; k++)
+                        if ((uint)indices[k] < (uint)model.VertexCount) valid++;
+
+                    int built = vertexTables.TryGetValue(i, out var sparse) ? sparse.VertexIndices.Length : 0;
+                    Assert.True(valid == built, $"[{tag}] 顶点 morph #{i}：PMX 合法项 {valid} ≠ 稀疏表 {built}。");
+                    if (built == 0) break;
+
+                    int w = 0;
+                    for (int k = 0; k < indices.Length; k++)
+                    {
+                        if ((uint)indices[k] >= (uint)model.VertexCount) continue;
+                        Assert.Equal(indices[k], sparse.VertexIndices[w]);
+                        Assert.Equal(positions[k * 3 + 0], sparse.Offsets[w].X, 1e-6f);
+                        Assert.Equal(positions[k * 3 + 1], sparse.Offsets[w].Y, 1e-6f);
+                        Assert.Equal(positions[k * 3 + 2], sparse.Offsets[w].Z, 1e-6f);
+                        w++;
+                    }
+                    checkedVertex++;
+                    break;
+                }
+
+                case PmxMorphType.Uv:
+                {
+                    var indices = src.Indices!;
+                    var offsets = src.Offsets!;
+                    int valid = 0;
+                    for (int k = 0; k < indices.Length; k++)
+                        if ((uint)indices[k] < (uint)model.VertexCount) valid++;
+
+                    int built = uvTables.TryGetValue(i, out var sparse) ? sparse.VertexIndices.Length : 0;
+                    Assert.True(valid == built, $"[{tag}] UV morph #{i}：PMX 合法项 {valid} ≠ 稀疏表 {built}。");
+                    if (built == 0) break;
+
+                    int w = 0;
+                    for (int k = 0; k < indices.Length; k++)
+                    {
+                        if ((uint)indices[k] >= (uint)model.VertexCount) continue;
+                        Assert.Equal(indices[k], sparse.VertexIndices[w]);
+                        Assert.Equal(offsets[k * 4 + 0], sparse.Offsets[w].X, 1e-6f);
+                        Assert.Equal(offsets[k * 4 + 1], sparse.Offsets[w].Y, 1e-6f);
+                        w++;
+                    }
+                    break;
+                }
+
+                case PmxMorphType.Bone:
+                {
+                    var indices = src.Indices!;
+                    var positions = src.Positions!;
+                    var rotations = src.Rotations!;
+                    int valid = 0;
+                    for (int k = 0; k < indices.Length; k++)
+                        if ((uint)indices[k] < (uint)model.BoneCount) valid++;
+
+                    int built = boneTables.TryGetValue(i, out var sparse) ? sparse.BoneIndices.Length : 0;
+                    Assert.True(valid == built, $"[{tag}] 骨 morph #{i}：PMX 合法项 {valid} ≠ 稀疏表 {built}。");
+                    if (built == 0) break;
+
+                    int w = 0;
+                    for (int k = 0; k < indices.Length; k++)
+                    {
+                        if ((uint)indices[k] >= (uint)model.BoneCount) continue;
+                        Assert.Equal(indices[k], sparse.BoneIndices[w]);
+                        Assert.Equal(positions[k * 3 + 0], sparse.Translations[w].X, 1e-6f);
+                        Assert.Equal(positions[k * 3 + 2], sparse.Translations[w].Z, 1e-6f);
+                        Assert.Equal(rotations[k * 4 + 3], sparse.Rotations[w].W, 1e-6f);
+                        w++;
+                    }
+                    break;
+                }
             }
-
-            Assert.Equal(valid, sparse.VertexIndices.Length);
-
-            // 逐项比对（保持源顺序；越界项在加载期已被过滤）
-            int w = 0;
-            for (int k = 0; k < indices.Length; k++)
-            {
-                int v = indices[k];
-                if ((uint)v >= (uint)model.VertexCount) continue;
-
-                Assert.Equal(v, sparse.VertexIndices[w]);
-                Assert.Equal(positions[k * 3 + 0], sparse.Offsets[w].X, 1e-6f);
-                Assert.Equal(positions[k * 3 + 1], sparse.Offsets[w].Y, 1e-6f);
-                Assert.Equal(positions[k * 3 + 2], sparse.Offsets[w].Z, 1e-6f);
-                w++;
-            }
-            checkedMorphs++;
         }
 
-        Assert.True(checkedMorphs > 0, "测试模型应含顶点 morph");
+        return checkedVertex;
     }
 
     [Fact]

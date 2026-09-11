@@ -56,7 +56,7 @@ GlesDebugOverlay? debugView = null;
 // PE 默认视野角 25°（设置对话框里的「视野角」，用户实测确认）
 const float PeViewAngleDeg = 25f;
 var camera = new OrbitCamera(
-    alpha: MathF.PI / 4f,
+    alpha: 0f,
     beta: MathF.PI / 3f,
     radius: 40f,
     target: System.Numerics.Vector3.Zero,
@@ -120,7 +120,8 @@ window.Load += () =>
     Console.WriteLine($"[Demo] 表情（morph）：{m.MorphNames.Length} 条 | 顶点 {m.VertexMorphs.Length} / UV {m.UvMorphs.Length} / " +
                       $"骨 {m.BoneMorphs.Length} / 材质 {m.MaterialMorphs.Count(e => e is not null)} / " +
                       $"组 {m.GroupMorphs.Count(g => g is not null)}" +
-                      $" | 顶点 morph 上 GPU：{(model.MorphEnabled ? "开" : "关（该模型无顶点 morph）")}" +
+                      $" | 上 GPU：顶点 {(model.MorphEnabled ? "开" : "关（该模型无顶点 morph）")}" +
+                      $"/ UV {(model.MorphUvEnabled ? "开" : "关")}" +
                       "（Flip/Impulse 按设计不支持，见 docs/2026-09-11-anim-morph-plan.md §0.2）");
     Console.WriteLine($"[Demo] 包围盒 min={Fmt(m.BoundsMin)} max={Fmt(m.BoundsMax)} size={Fmt(m.BoundsSize)}");
 
@@ -590,7 +591,7 @@ static int CountDiff(byte[] a, byte[] b)
 
 static string? FindDefaultModel()
 {
-    const string Relative = "samples/MikuEngine.Demo/Model/Model.pmx";
+    const string Relative = "samples/MikuEngine.Demo/Model/1/1.pmx";
 
     // 从输出目录往上找仓库根（bin/Debug/net10.0 → ... → 仓库根）
     var dir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -608,7 +609,7 @@ static string? FindDefaultModel()
 
 static string? FindMotionFile()
 {
-    const string Relative = "samples/MikuEngine.Demo/Motion/Motion.vmd";
+    const string Relative = "samples/MikuEngine.Demo/Motion/test.vmd";
 
     var dir = new DirectoryInfo(AppContext.BaseDirectory);
     while (dir is not null)

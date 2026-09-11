@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
+using MikuEngine.Core.Animation;
 using Silk.NET.OpenGL;
 
 namespace MikuEngine.Render.GLES;
@@ -73,8 +74,10 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     private readonly uint _vao, _vbo, _ebo;
     private readonly uint _frameUbo;
     private readonly GlesSkinMatricesBuffer _skin;
-    private readonly GlesMorphBuffer _morph;
+    private readonly GlesMorphBuffer _morph;       // 顶点 morph（binding 2，vec4）
+    private readonly GlesMorphBuffer _morphUv;     // UV morph（binding 3，vec2）
     private readonly bool _hasVertexMorph;
+    private readonly bool _hasUvMorph;
     private readonly GlesTextureLibrary _textures;
     private readonly MikuEngine.Core.Models.SkeletalModel _model;
     private readonly bool _hasEdge;
@@ -84,9 +87,11 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     // uniform locations
     private readonly int _locSkinMatBase;
     private readonly int _locMorphEnabled;
+    private readonly int _locMorphUvEnabled;
     private readonly int _locDiffuse, _locSpecular, _locShininess, _locAmbient;
     private readonly int _locEnableTexture, _locEnableSphere, _locEnableToon, _locSphereMode;
     private readonly int _locDiffuseTex, _locSphereTex, _locToonTex;
+    private readonly int _locTextureCoeff, _locSphereCoeff, _locToonCoeff;
 
     // edge program 的 uniform
     private readonly int _locEdgeSkinMatBase, _locEdgeColor, _locEdgeSize, _locEdgeMorphEnabled;
@@ -175,6 +180,9 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     /// <summary>模型是否有顶点 morph（决定 <c>uMorphEnabled</c> 与是否可安全读 binding 2）。</summary>
     public bool MorphEnabled => _hasVertexMorph;
 
+    /// <summary>模型是否有 UV morph（决定 <c>uMorphUvEnabled</c>）。</summary>
+    public bool MorphUvEnabled => _hasUvMorph;
+
     /// <summary>最近一帧累加过的顶点数（诊断用；0 = 本帧没有活跃表情）。</summary>
     public int MorphTouchedVertexCount => _morph.LastTouchedVertexCount;
 
@@ -195,6 +203,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
 
         _locSkinMatBase = gl.GetUniformLocation(_program, "uSkinMatBase");
         _locMorphEnabled = gl.GetUniformLocation(_program, "uMorphEnabled");
+        _locMorphUvEnabled = gl.GetUniformLocation(_program, "uMorphUvEnabled");
         _locDiffuse = gl.GetUniformLocation(_program, "uMaterialDiffuse");
         _locSpecular = gl.GetUniformLocation(_program, "uMaterialSpecular");
         _locShininess = gl.GetUniformLocation(_program, "uMaterialShininess");
@@ -219,12 +228,16 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         _locDiffuseTex = gl.GetUniformLocation(_program, "uDiffuseTex");
         _locSphereTex = gl.GetUniformLocation(_program, "uSphereTex");
         _locToonTex = gl.GetUniformLocation(_program, "uToonTex");
+        _locTextureCoeff = gl.GetUniformLocation(_program, "uTextureCoeff");
+        _locSphereCoeff = gl.GetUniformLocation(_program, "uSphereCoeff");
+        _locToonCoeff = gl.GetUniformLocation(_program, "uToonCoeff");
 
         // 注意：位置为 -1 意味着着色器里没有这个 uniform（名字打错 / 类型不匹配被优化掉），
         // 后续 glUniform* 会静默失效 —— 曾因此导致整体贴图丢失，这里显式暴露。
         foreach (var (name, loc) in new (string, int)[]
         {
             ("uSkinMatBase", _locSkinMatBase), ("uMorphEnabled", _locMorphEnabled),
+            ("uMorphUvEnabled", _locMorphUvEnabled),
             ("uMaterialDiffuse", _locDiffuse),
             ("uMaterialSpecular", _locSpecular), ("uMaterialShininess", _locShininess),
             ("uMaterialAmbient", _locAmbient), ("uEnableTexture", _locEnableTexture),
@@ -240,6 +253,8 @@ public sealed unsafe class GlesModelRenderer : IDisposable
             ("uNormalOffset", _locNormalOffset),
             ("uDiffuseTex", _locDiffuseTex), ("uSphereTex", _locSphereTex),
             ("uToonTex", _locToonTex),
+            ("uTextureCoeff", _locTextureCoeff), ("uSphereCoeff", _locSphereCoeff),
+            ("uToonCoeff", _locToonCoeff),
         })
         {
             if (loc < 0)
@@ -309,7 +324,11 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         // 顶点 morph：没有顶点 morph 的模型也建一条 1 元素哑缓冲，保证 shader 里 binding 2
         // 始终有缓冲可绑；是否读它由 uMorphEnabled 决定（见 GlesMorphBuffer 注释）。
         _hasVertexMorph = model.VertexMorphs.Length > 0;
-        _morph = new GlesMorphBuffer(device, _hasVertexMorph ? model.VertexCount : 0);
+        _morph = new GlesMorphBuffer(device, _hasVertexMorph ? model.VertexCount : 0, components: 4);
+
+        // UV morph：同上，占用 binding 3（vec2）。
+        _hasUvMorph = model.UvMorphs.Length > 0;
+        _morphUv = new GlesMorphBuffer(device, _hasUvMorph ? model.VertexCount : 0, components: 2);
     }
 
     private static bool HasAnyEdge(Core.Models.SkeletalModel model)
@@ -398,9 +417,10 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         SkinMatrixBaseOffset = _skin.Append(_model.SkinMatrices);
         _skin.Flush();
 
-        // 顶点 morph 偏移：只重算「活跃 morph 的受影响顶点」并上传脏区（内存/带宽都是 O(顶点数)，
-        // 与 morph 数量无关）。必须与蒙皮矩阵同帧提交 —— 影图 pass 与主渲染都读这一份。
+        // 顶点 / UV morph 偏移：只重算「活跃 morph 的受影响顶点」并上传脏区（内存/带宽都是
+        // O(顶点数)，与 morph 数量无关）。必须与蒙皮矩阵同帧提交 —— 影图 pass 与主渲染读同一份。
         _morph.Update(_model, _model.MorphWeights);
+        _morphUv.UpdateUv(_model, _model.MorphWeights);
     }
 
     /// <summary>每帧调用。必须先调用 <see cref="PrepareFrame"/>。</summary>
@@ -420,6 +440,10 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         // （此时缓冲里全是 0，但 shader 干脆不读）。
         _morph.Bind(2);
         gl.Uniform1(_locMorphEnabled, _hasVertexMorph ? 1f : 0f);
+
+        // UV morph：binding 3（只影响主纹理 UV；edge / shadow 不采样主纹理，无需偏移）
+        _morphUv.Bind(3);
+        gl.Uniform1(_locMorphUvEnabled, _hasUvMorph ? 1f : 0f);
 
         gl.BindVertexArray(_vao);
 
@@ -477,12 +501,17 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         {
             if (seg.IndexCount <= 0) continue;
 
-            var m = _model.Materials[seg.MaterialIndex];
+            // 材质 morph：基础材质 + 全部活跃材质 morph 混合后的「有效材质」。
+            // 无活跃材质 morph 时逐字段等于基础材质（TextureCoeff 恒等 (1,1,1,1)）。
+            var m = MmdMorphEvaluator.ResolveMaterial(_model, seg.MaterialIndex);
 
             gl.Uniform4(_locDiffuse, m.Diffuse.X, m.Diffuse.Y, m.Diffuse.Z, m.Diffuse.W);
             gl.Uniform4(_locSpecular, m.Specular.X, m.Specular.Y, m.Specular.Z, 1f);
             gl.Uniform1(_locShininess, m.Shininess);
             gl.Uniform4(_locAmbient, m.Ambient.X, m.Ambient.Y, m.Ambient.Z, 1f);
+            gl.Uniform4(_locTextureCoeff, m.TextureColor.X, m.TextureColor.Y, m.TextureColor.Z, m.TextureColor.W);
+            gl.Uniform4(_locSphereCoeff, m.SphereColor.X, m.SphereColor.Y, m.SphereColor.Z, m.SphereColor.W);
+            gl.Uniform4(_locToonCoeff, m.ToonColor.X, m.ToonColor.Y, m.ToonColor.Z, m.ToonColor.W);
 
             gl.Uniform1(_locEnableTexture, seg.EnableTexture ? 1f : 0f);
             gl.Uniform1(_locEnableSphere, seg.EnableSphere ? 1f : 0f);
@@ -533,7 +562,10 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         {
             if (!seg.EnableEdge || seg.IndexCount <= 0) continue;
 
-            var m = _model.Materials[seg.MaterialIndex];
+            // 材质 morph 可以改描边颜色 / 宽度；宽度被乘算到 0 时该材质的描边应消失。
+            var m = MmdMorphEvaluator.ResolveMaterial(_model, seg.MaterialIndex);
+            if (m.EdgeSize <= 0f) continue;
+
             gl.Uniform4(_locEdgeColor, m.EdgeColor.X, m.EdgeColor.Y, m.EdgeColor.Z, m.EdgeColor.W);
             gl.Uniform1(_locEdgeSize, m.EdgeSize);
 
@@ -603,6 +635,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         gl.DeleteProgram(_edgeProgram);
         _skin.Dispose();
         _morph.Dispose();
+        _morphUv.Dispose();
         _textures.Dispose();
     }
 }

@@ -38,11 +38,20 @@ layout(std430, binding = 2) buffer MorphBlock {
     vec4 uMorphOffsets[];    // xyz = 偏移，w 未用（std430 下 vec4 数组 stride = 16B）
 };
 
+// ── UV morph 偏移 SSBO (binding 3) ─────────────────────────────────────
+// PMX 的 UV morph 偏移直接加在顶点 UV 上（本引擎上传的是文件原序 UV 且采样已与
+// PmxEditor 对齐，因此这里【不做】V 翻转）。只影响主纹理 UV；球贴图 / toon 的
+// 坐标由法线与视图推出，不受 UV morph 影响。
+layout(std430, binding = 3) buffer MorphUvBlock {
+    vec2 uMorphUvs[];        // std430 下 vec2 数组 stride = 8B
+};
+
 // ── per-draw uniforms ───────────────────────────────────────────────────
 // 全部用 float：C# 侧统一走 glUniform1f。若这里声明成 int 而上传用 1f，
 // 则会触发 GL_INVALID_OPERATION 且 uniform 保持默认值 0 —— 纹理就会整体失效。
 uniform float uSkinMatBase;      // 当前角色在 SSBO 里的骨骼起点
 uniform float uMorphEnabled;     // 0 = 模型无顶点 morph（此时不读 binding 2）
+uniform float uMorphUvEnabled;   // 0 = 模型无 UV morph（此时不读 binding 3）
 uniform vec4  uMaterialDiffuse;  // rgb = 材质色, a = MMD 非透过度
 uniform vec4  uMaterialSpecular;
 uniform float uMaterialShininess;
@@ -119,7 +128,8 @@ void main()
 
     // ── 输出 ────────────────────────────────────────────────────────────
     vNormal = nWorld;
-    vUv = aUv.xy;
+    // UV morph：主纹理 UV 加偏移（模型空间无关，纯粹是 UV 空间的位移）
+    vUv = aUv.xy + (uMorphUvEnabled > 0.5 ? uMorphUvs[gl_VertexID] : vec2(0.0));
 
     // Sphere UV（PE L437-438）：D3D9 约定，v = n.y * -0.5 + 0.5
     // 纹理数据按文件行序原样上传，采样结果与 PmxEditor 一致，无需翻转。

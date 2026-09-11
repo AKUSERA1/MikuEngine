@@ -26,6 +26,12 @@ uniform sampler2D uDiffuseTex;
 uniform sampler2D uSphereTex;
 uniform sampler2D uToonTex;
 
+// 材质 morph 的色调系数（Multiplication 结果；无 morph 时恒为 (1,1,1,1)）。
+// 由 Core 的 MmdMorphEvaluator.ResolveMaterial 逐段算好，这里只做乘法。
+uniform vec4 uTextureCoeff;
+uniform vec4 uSphereCoeff;
+uniform vec4 uToonCoeff;
+
 // 开关/模式类 uniform 一律用 float（C# 侧走 glUniform1f）。
 // 之前声明成 int 却用 glUniform1f 上传 → GL_INVALID_OPERATION → 恒为 0 → 纹理不采样。
 uniform float uEnableTexture;
@@ -75,17 +81,20 @@ void main()
 
     vec4 col = clamp(vColor, 0.0, 1.0);
 
+    // 材质 morph 的三个色调系数（默认恒等 (1,1,1,1)，权重为 0 时逐像素等价于无 morph）。
+    // PMX 的 MaterialMorph 对每个纹理色调都可做 Multiply / Add，Core 侧 MmdMorphEvaluator
+    // 已把「基础值 + 全部活跃材质 morph」混合好，这里只做一次乘法。
     if (uEnableTexture > 0.5)
-        col *= texture(uDiffuseTex, vUv);
+        col *= texture(uDiffuseTex, vUv) * uTextureCoeff;
 
     if (uEnableSphere > 0.5)
     {
         if (sphereMode == 1)
-            col *= texture(uSphereTex, vUvSphere);
+            col *= texture(uSphereTex, vUvSphere) * uSphereCoeff;
         else if (sphereMode == 2)
-            col.rgb += texture(uSphereTex, vUvSphere).rgb;
+            col.rgb += texture(uSphereTex, vUvSphere).rgb * uSphereCoeff.rgb;
         else if (sphereMode == 3)
-            col *= texture(uSphereTex, vUv);   // SubTex：PE 用 UVA1，v1 退化成主 UV
+            col *= texture(uSphereTex, vUv) * uSphereCoeff;   // SubTex：PE 用 UVA1，v1 退化成主 UV
     }
 
     // ── Alpha ─────────────────────────────────────────
@@ -101,9 +110,9 @@ void main()
     if (uEnableToon > 0.5)
     {
         if (toonMode == 1)
-            toonCol = texture(uToonTex, vec2(vUv.x, vToonV));            // PE L554
+            toonCol = texture(uToonTex, vec2(vUv.x, vToonV)) * uToonCoeff;            // PE L554
         else if (toonMode == 2)
-            toonCol = texture(uToonTex, vec2(vUv.x, vToonV * vToonV));   // PE L560: p*p
+            toonCol = texture(uToonTex, vec2(vUv.x, vToonV * vToonV)) * uToonCoeff;   // PE L560: p*p
     }
 
     if (uEnableSelfShadow > 0.5)
@@ -209,7 +218,7 @@ void main()
             else
             {
                 // PE L578-585：与 toon(0,1) 角点色合成，cf2 有 4 倍固定增益
-                vec4 toon = texture(uToonTex, vec2(0.0, 1.0));
+                vec4 toon = texture(uToonTex, vec2(0.0, 1.0)) * uToonCoeff;
                 vec4 shadowCol = col * toon;
                 float cf2 = cf * cc * 4.0;
                 col = col * (1.0 - cf2) + shadowCol * cf2;
