@@ -20,13 +20,13 @@ SkeletalModel (运行时模型)      ← 引擎侧直接消费的形态
 
 ## 源文件
 
-| 文件 | 说明 |
-|---|---|
-| [PmxModelData.cs](../../../src/MikuEngine.Core/Models/PmxModelData.cs) | 所有 PMX 数据类型（PmxModel / PmxVertex / PmxBone / PmxMaterial / ...） |
-| [PmxParser.cs](../../../src/MikuEngine.Core/Models/PmxParser.cs) | 二进制解析器（移植自 babylon-mmd） |
-| [PmxTexturePath.cs](../../../src/MikuEngine.Core/Models/PmxTexturePath.cs) | 纹理路径归一化工具 |
-| [SkeletalModel.cs](../../../src/MikuEngine.Core/Models/SkeletalModel.cs) | 运行时模型 + 骨骼姿势计算 |
-| [SkeletalModelConverter.cs](../../../src/MikuEngine.Core/Models/SkeletalModelConverter.cs) | PmxModel → SkeletalModel 转换 |
+| 文件                                                                                                                  | 说明                                                              |
+| ------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| [PmxModelData.cs](../../src/MikuEngine.Core/Models/PmxModelData.cs)                                                 | 所有 PMX 数据类型（PmxModel / PmxVertex / PmxBone / PmxMaterial / ...） |
+| [PmxParser.cs](../../src/MikuEngine.Core/Models/PmxParser.cs)                                                       | 二进制解析器（移植自 babylon-mmd）                                         |
+| [PmxTexturePath.cs](../../src/MikuEngine.Core/Models/PmxTexturePath.cs)                                             | 纹理路径归一化工具                                                       |
+| [SkeletalModel.cs](../../src/MikuEngine.Core/Models/SkeletalModel.cs)                                               | 运行时模型 + 骨骼姿势计算                                                  |
+| [SkeletalModelConverter.cs](../../src/MikuEngine.Core/Models/SkeletalModelConverter.cs) | PmxModel → SkeletalModel 转换                                     |
 
 ---
 
@@ -47,31 +47,31 @@ PmxModel pmx = PmxParser.Parse(data, out int remaining);
 
 ### PmxModel 结构
 
-| 属性 | 类型 | 说明 |
-|---|---|---|
-| `Header` | `PmxHeader` | 签名 / 版本 / 编码 / 各索引宽度 |
-| `Vertices` | `PmxVertex[]` | 位置 / 法线 / UV / 权重 / 边缘系数 |
-| `Indices` | `int[]` | 三角形索引 |
-| `Textures` | `string[]` | 原始相对路径（不归一化） |
-| `Materials` | `PmxMaterial[]` | 材质定义（漫反射 / 球体贴图 / Toon / 标志位） |
-| `Bones` | `PmxBone[]` | 骨骼（位置 / 父骨 / IK / 追加变换 / 角度限制） |
-| `Morphs` | `PmxMorph[]` | 表情（顶点 / 骨骼 / UV / 材质 / 组 / 翻转 / 冲量） |
-| `DisplayFrames` | `PmxDisplayFrame[]` | 骨骼 / 表情分组 |
-| `RigidBodies` | `PmxRigidBody[]` | 刚体（关联骨骼 / 形状 / 质量 / 物理模式） |
-| `Joints` | `PmxJoint[]` | 物理关节（约束参数） |
-| `SoftBodies` | `PmxSoftBody[]` | 软体（仅 PMX 2.1） |
+| 属性              | 类型                  | 说明                                  |
+| --------------- | ------------------- | ----------------------------------- |
+| `Header`        | `PmxHeader`         | 签名 / 版本 / 编码 / 各索引宽度                |
+| `Vertices`      | `PmxVertex[]`       | 位置 / 法线 / UV / 权重 / 边缘系数            |
+| `Indices`       | `int[]`             | 三角形索引                               |
+| `Textures`      | `string[]`          | 原始相对路径（不归一化）                        |
+| `Materials`     | `PmxMaterial[]`     | 材质定义（漫反射 / 球体贴图 / Toon / 标志位）       |
+| `Bones`         | `PmxBone[]`         | 骨骼（位置 / 父骨 / IK / 追加变换 / 角度限制）      |
+| `Morphs`        | `PmxMorph[]`        | 表情（顶点 / 骨骼 / UV / 材质 / 组 / 翻转 / 冲量） |
+| `DisplayFrames` | `PmxDisplayFrame[]` | 骨骼 / 表情分组                           |
+| `RigidBodies`   | `PmxRigidBody[]`    | 刚体（关联骨骼 / 形状 / 质量 / 物理模式）           |
+| `Joints`        | `PmxJoint[]`        | 物理关节（约束参数）                          |
+| `SoftBodies`    | `PmxSoftBody[]`     | 软体（仅 PMX 2.1）                       |
 
 ### 顶点骨骼权重（PmxBoneWeight）
 
 PMX 的权重类型：
 
-| 类型 | 骨数 | 说明 |
-|---|---|---|
-| `Bdef1` | 1 | 完全刚性绑定 |
-| `Bdef2` | 2 | 两骨线性混合 |
-| `Bdef4` | 4 | 四骨线性混合 |
-| `Sdef` | 2 | 球形变形（当前 v1 退化为 Bdef2） |
-| `Qdef` | 4 | 四元数变形（当前 v1 退化为 Bdef4） |
+| 类型      | 骨数  | 说明                     |
+| ------- | --- | ---------------------- |
+| `Bdef1` | 1   | 完全刚性绑定                 |
+| `Bdef2` | 2   | 两骨线性混合                 |
+| `Bdef4` | 4   | 四骨线性混合                 |
+| `Sdef`  | 2   | 球形变形（当前 v1 退化为 Bdef2）  |
+| `Qdef`  | 4   | 四元数变形（当前 v1 退化为 Bdef4） |
 
 `PmxBoneWeight.EffectiveWeight(i)` 处理了 Bdef2/SDEF 的隐式权重推导。
 
@@ -136,6 +136,7 @@ SkeletalModel model = SkeletalModelConverter.Convert(pmx);
 ### 权重处理（ComputeWeightBytes）
 
 权重转字节时做了多重兜底：
+
 1. SDEF → Bdef2 退化，QDEF → Bdef4 退化
 2. 第 4 槽用推导值 `1 - w0 - w1 - w2` 而非文件存的 Weight3
 3. 脏数据兜底：负权重清零 + 整体归一化
@@ -145,11 +146,11 @@ SkeletalModel model = SkeletalModelConverter.Convert(pmx);
 
 简化规则，只看 Diffuse.W（MMD 非透过度）：
 
-| 分类 | 条件 | 说明 |
-|---|---|---|
-| `Opaque` | Diffuse.W >= 0.99 且无贴图 | 不透明 |
-| `Cutout` | 有贴图 | 贴图裁剪 |
-| `Blended` | Diffuse.W < 0.99 | 半透明混合 |
+| 分类        | 条件                     | 说明    |
+| --------- | ---------------------- | ----- |
+| `Opaque`  | Diffuse.W >= 0.99 且无贴图 | 不透明   |
+| `Cutout`  | 有贴图                    | 贴图裁剪  |
+| `Blended` | Diffuse.W < 0.99       | 半透明混合 |
 
 > 注意：当前 GlesModelRenderer **不按此分类分队列**，按 PMX 材质顺序单一队列绘制，对齐 PmxEditor 的行为。
 

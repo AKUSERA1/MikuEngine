@@ -18,3 +18,4 @@ Core 层是**纯数学 / 纯数据**，零平台依赖、零渲染 API 依赖。
 | [orbit-camera.md](orbit-camera.md) | 轨道相机完整 API |
 | [pmx-parser.md](pmx-parser.md) | PmxParser · PmxModel · SkeletalModel · SkeletalModelConverter |
 | [mmd-math.md](mmd-math.md) | MmdMath：YXZ 欧拉角 ↔ 四元数转换 |
+| [animation/index.md](animation/index.md) | 动画子系统总览（VMD 加载 → 播放 → 混合 → 可见性 → 生命周期） |

@@ -50,6 +50,7 @@
 | [OrbitCamera API](core/orbit-camera.md) | 轨道相机的构造、属性、矩阵输出方法 |
 | [PMX 模型解析](core/pmx-parser.md) | PmxParser · PmxModel · SkeletalModel · SkeletalModelConverter |
 | [MMD 数学工具](core/mmd-math.md) | MmdMath：YXZ 欧拉角 ↔ 四元数转换 |
+| [动画子系统](core/animation/index.md) | VMD 加载 · 播放 · 多轨混合 · 表示枠可见性 · 生命周期 |
 
 ### ③ Engine 模块
 
@@ -79,7 +80,6 @@
 | 模块 | 状态 |
 |---|---|
 | MikuEngine.Physics | 🚧 物理引擎移植（TypeScript → C#） |
-| Morph 动画 | 🚧 |
 | SDEF 球形变形 | 🚧 |
 | 共享光空间 / 多模型 | 🚧 |
 
