@@ -22,6 +22,7 @@ public static class SkeletalModelConverter
         };
 
         BuildBones(pmx, model);
+        BuildIkChains(pmx, model);
         BuildVertices(pmx, model);
         BuildIndices(pmx, model);
         BuildSegments(pmx, model);
@@ -29,6 +30,37 @@ public static class SkeletalModelConverter
 
         model.ResetPose();
         return model;
+    }
+
+    // ---------------------------------------------------------------- IK
+
+    /// <summary>
+    /// IK 链与 IK 相关的平行数组。数组尺寸<b>恒为 BoneCount</b>（即使模型没有任何 IK 链），
+    /// 这样 <c>UpdateWorldMatrices</c> 里的分支判据固定为 <c>IsIkLink[i]</c>，不需要额外空判。
+    /// </summary>
+    private static void BuildIkChains(PmxModel pmx, SkeletalModel model)
+    {
+        int n = model.BoneCount;
+
+        model.IkChains = MmdIkChainBuilder.Build(pmx.Bones);
+        model.IsIkLink = new bool[n];
+        model.IkRotations = new Quaternion[n];
+        model.IkLinkBaseRotations = new Quaternion[n];
+        model.IkEnabled = new bool[model.IkChains.Length];
+
+        // new Quaternion[n] 得到的是 (0,0,0,0)，必须显式置为单位四元数。
+        for (int i = 0; i < n; i++)
+        {
+            model.IkRotations[i] = Quaternion.Identity;
+            model.IkLinkBaseRotations[i] = Quaternion.Identity;
+        }
+
+        for (int c = 0; c < model.IkChains.Length; c++)
+        {
+            foreach (var link in model.IkChains[c].Links)
+                model.IsIkLink[link.BoneIndex] = true;
+            model.IkEnabled[c] = true;      // 表示枠未声明 ⇒ 默认启用
+        }
     }
 
     // ---------------------------------------------------------------- 骨骼

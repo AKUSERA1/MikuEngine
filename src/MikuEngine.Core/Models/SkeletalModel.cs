@@ -193,10 +193,60 @@ public sealed class SkeletalModel
     /// <summary>軸制限轴（<b>已归一化</b>；<see cref="Vector3.Zero"/> = 无限制）。带限制的骨只能绕该轴旋转。</summary>
     public Vector3[] AxisLimits = Array.Empty<Vector3>();
 
+    // ── IK（反向动力学）─────────────────────────────────────────────────
+    //
+    // 设计要点（详见 docs/2026-09-12-mmd-ik-design.md）：
+    //   * IK 结果写进【独立】的 IkRotations[]，**绝不回写 LocalRotations**。付与是在
+    //     UpdateWorldMatrices 内、且刻意不回写 LocalRotations 以保证幂等；一旦 IK 回写 LocalRotations，
+    //     下一帧付与会把上次的 IK 同时继承一次（双重付与），且本方法不再幂等。
+    //   * 位置：叠加在【付与之后】的旋转上，与 PmxEditor UpdateLocalMatrix 的
+    //     `rotation *= IKRotation`（IsIKLink 分支在 IsRotateAdd 之后）同序。
+
+    /// <summary>运行时 IK 链（转换期由 <see cref="MmdIkChainBuilder.Build"/> 构建一次）。</summary>
+    public MmdIkChain[] IkChains = Array.Empty<MmdIkChain>();
+
+    /// <summary>本骨是否为某条 IK 链的链骨。只有 true 的骨才读 <see cref="IkRotations"/>。</summary>
+    public bool[] IsIkLink = Array.Empty<bool>();
+
+    /// <summary>
+    /// IK 求解结果（相对"付与后旋转"的增量）。每帧由 IK 求解器整体复位为 Identity 后再写，
+    /// **不跨帧**。长度恒等于 <see cref="BoneCount"/>。
+    /// </summary>
+    public Quaternion[] IkRotations = Array.Empty<Quaternion>();
+
+    /// <summary>
+    /// 链骨的「付与之后、IK 之前」旋转（对应 PmxEditor 的 <c>LocalRotationForIKLink</c>）。
+    /// IK 的角度限制要在 <c>base * IkRotations[i]</c> 上做 Euler 分解与回弹，故由
+    /// <see cref="UpdateWorldMatrices"/> 每帧导出（IK 求值过程中也会被增量重算覆盖）。
+    /// </summary>
+    public Quaternion[] IkLinkBaseRotations = Array.Empty<Quaternion>();
+
+    /// <summary>
+    /// 每条链的使能位，索引与 <see cref="IkChains"/> 对齐。VMD 表示枠的 IK 开关写入此处；
+    /// 未声明的默认全开（表示枠是阶梯量，帧号早于首键时视为启用）。
+    /// </summary>
+    public bool[] IkEnabled = Array.Empty<bool>();
+
+    /// <summary>IK 求解总开关（A/B 对照用；关闭时 <see cref="IkRotations"/> 恒为单位阵）。</summary>
+    public bool IkSolverEnabled = true;
+
     // 付与求值需要「源骨的最终局部变换」，而已完成骨的最终值不能再覆盖 Local*（否则重复调用
     // UpdateWorldMatrices 会二次付与）。因此用独立暂存数组，保证本方法幂等。
     private Quaternion[] _finalRotations = Array.Empty<Quaternion>();
     private Vector3[] _finalTranslations = Array.Empty<Vector3>();
+
+    /// <summary><see cref="UpdateWorldMatricesSubtree"/> 的子树标记，复用避免每帧分配。</summary>
+    private bool[] _subtreeMask = Array.Empty<bool>();
+
+    /// <summary>
+    /// 最近一次 <see cref="UpdateWorldMatrices"/> 算出的「付与之后」的最终局部旋转/平移（只读）。
+    /// <see cref="IkSolverEnabled"/> 为 false 时跑一次，得到的就是「付与之后、IK 之前」的有效局部变换 ——
+    /// IK 诊断导出靠它让外部（Node 侧的 reze oracle）能原样重放同一套骨架，不必复刻付与/軸制限。
+    /// </summary>
+    public ReadOnlySpan<Quaternion> FinalRotations => _finalRotations;
+
+    /// <inheritdoc cref="FinalRotations"/>
+    public ReadOnlySpan<Vector3> FinalTranslations => _finalTranslations;
 
     public Matrix4x4[] InverseBind = Array.Empty<Matrix4x4>();
     public Matrix4x4[] WorldMatrices = Array.Empty<Matrix4x4>();
@@ -258,65 +308,121 @@ public sealed class SkeletalModel
     /// </summary>
     public void UpdateWorldMatrices()
     {
-        if (_finalRotations.Length != BoneCount)
+        EnsureScratch();
+
+        for (int k = 0; k < DeformOrder.Length; k++)
+            RecomputeBone(DeformOrder[k]);
+    }
+
+    /// <summary>
+    /// 只重算 <paramref name="rootBone"/> 及其<b>全部后代</b>的世界/蒙皮矩阵，其余骨保留上一轮的值。
+    ///
+    /// 供 IK 迭代内的增量刷新使用（复刻 PmxEditor <c>IKTransform.CalcBonePosition_Link</c> 的
+    /// "只推进链内"语义 —— 这里取"子树"作为<b>超集</b>：链骨与末端之间可能夹着非链骨，
+    /// 只刷链骨会让中间骨的陈旧世界矩阵污染链骨自身的 world，而重算超集的值与之完全一致）。
+    ///
+    /// 遍历仍走 <see cref="DeformOrder"/>，因此"父先于子"与"付与源先于付与目标"两个不变量不受影响。
+    /// </summary>
+    public void UpdateWorldMatricesSubtree(int rootBone)
+    {
+        if ((uint)rootBone >= (uint)BoneCount) return;
+        EnsureScratch();
+
+        // 标记子树：DeformOrder 保证父先于子，一趟即可传播。
+        System.Array.Clear(_subtreeMask, 0, BoneCount);
+        _subtreeMask[rootBone] = true;
+        for (int k = 0; k < DeformOrder.Length; k++)
         {
-            _finalRotations = new Quaternion[BoneCount];
-            _finalTranslations = new Vector3[BoneCount];
+            int i = DeformOrder[k];
+            if (_subtreeMask[i]) continue;
+            int p = ParentIndices[i];
+            if (p >= 0 && _subtreeMask[p]) _subtreeMask[i] = true;
         }
 
         for (int k = 0; k < DeformOrder.Length; k++)
         {
             int i = DeformOrder[k];
+            if (_subtreeMask[i]) RecomputeBone(i);
+        }
+    }
 
-            Quaternion rotation = LocalRotations[i];
-            Vector3 translation = LocalTranslations[i];
+    private void EnsureScratch()
+    {
+        if (_finalRotations.Length != BoneCount)
+        {
+            _finalRotations = new Quaternion[BoneCount];
+            _finalTranslations = new Vector3[BoneCount];
+        }
+        if (_subtreeMask.Length != BoneCount)
+            _subtreeMask = new bool[BoneCount];
+    }
 
-            // ── 軸制限：先约束「自身动画旋转」，再谈付与 ──────────────────────
-            // MMD 在动效加载时就把带軸制限骨的旋转烘焙到该轴上，因此约束发生在付与之前。
-            Vector3 axis = AxisLimits[i];
-            if (axis != Vector3.Zero)
-                rotation = ProjectOntoAxis(rotation, axis);
+    /// <summary>
+    /// 单根骨：軸制限 → 付与 → IK → 世界矩阵 / 蒙皮矩阵。幂等（只写暂存数组与输出数组）。
+    /// </summary>
+    private void RecomputeBone(int i)
+    {
+        Quaternion rotation = LocalRotations[i];
+        Vector3 translation = LocalTranslations[i];
 
-            // ── 付与（append transform）─────────────────────────────────────
-            // 继承的是源骨的「最终」变换（源骨自己的付与已算完）。
-            //   * 默认（局部模式）：旋转取源骨最终局部旋转 _finalRotations[src]，
-            //     平移取「当前局部平移 − 绑定局部平移」（即动效偏移）。
-            //   * 世界模式（PMX 骨标志 bit7 LocalAppendTransform）：旋转取源骨的最终【世界】旋转，
-            //     平移取源骨原点相对绑定姿势的【世界】位移（World · InverseBind 的平移）。
-            //     与 babylon-mmd AppendTransformSolver 的 isLocal 分支逐式等价。
-            int src = AppendSources[i];
-            if (src >= 0)
+        // ── 軸制限：先约束「自身动画旋转」，再谈付与 ──────────────────────
+        // MMD 在动效加载时就把带軸制限骨的旋转烘焙到该轴上，因此约束发生在付与之前。
+        Vector3 axis = AxisLimits[i];
+        if (axis != Vector3.Zero)
+            rotation = ProjectOntoAxis(rotation, axis);
+
+        // ── 付与（append transform）─────────────────────────────────────
+        // 继承的是源骨的「最终」变换（源骨自己的付与已算完）。
+        //   * 默认（局部模式）：旋转取源骨最终局部旋转 _finalRotations[src]，
+        //     平移取「当前局部平移 − 绑定局部平移」（即动效偏移）。
+        //   * 世界模式（PMX 骨标志 bit7 LocalAppendTransform）：旋转取源骨的最终【世界】旋转，
+        //     平移取源骨原点相对绑定姿势的【世界】位移（World · InverseBind 的平移）。
+        //     与 babylon-mmd AppendTransformSolver 的 isLocal 分支逐式等价。
+        int src = AppendSources[i];
+        if (src >= 0)
+        {
+            float ratio = AppendRatios[i];
+
+            if (AppendRotate[i])
             {
-                float ratio = AppendRatios[i];
-
-                if (AppendRotate[i])
-                {
-                    Quaternion srcRot = AppendIsLocal[i]
-                        ? WorldRotationOf(src)
-                        : _finalRotations[src];
-                    rotation = rotation * AppendRotation(srcRot, ratio);
-                }
-
-                if (AppendMove[i])
-                {
-                    Vector3 srcOffset = AppendIsLocal[i]
-                        ? WorldDisplacementOf(src)
-                        : _finalTranslations[src] - LocalPositions[src];
-                    translation += srcOffset * ratio;
-                }
+                Quaternion srcRot = AppendIsLocal[i]
+                    ? WorldRotationOf(src)
+                    : _finalRotations[src];
+                rotation = rotation * AppendRotation(srcRot, ratio);
             }
 
-            _finalRotations[i] = rotation;
-            _finalTranslations[i] = translation;
-
-            // local = R · T（先绕骨原点旋转，再平移到父空间中的骨位置）
-            Matrix4x4 local = Matrix4x4.CreateFromQuaternion(rotation);
-            local.Translation = translation;
-
-            int parent = ParentIndices[i];
-            WorldMatrices[i] = parent >= 0 ? local * WorldMatrices[parent] : local;
-            SkinMatrices[i] = InverseBind[i] * WorldMatrices[i];
+            if (AppendMove[i])
+            {
+                Vector3 srcOffset = AppendIsLocal[i]
+                    ? WorldDisplacementOf(src)
+                    : _finalTranslations[src] - LocalPositions[src];
+                translation += srcOffset * ratio;
+            }
         }
+
+        // ── IK：叠加在「付与之后」的旋转上 ────────────────────────────────
+        // 对应 PmxEditor UpdateLocalMatrix 的 `if (IsIKLink) { LocalRotationForIKLink = rotation;
+        // rotation *= IKRotation; }`（付与的 IsRotateAdd 在前，IK 在后，顺序一致）。
+        // 只有 IK 链骨需要读 IkRotations，非链骨完全不碰这一段。
+        if (IsIkLink.Length == BoneCount && IsIkLink[i])
+        {
+            IkLinkBaseRotations[i] = rotation;
+            rotation = rotation * IkRotations[i];
+        }
+
+        // 源骨以「最终」旋转被继承 —— PE 的付与局部模式在源骨是 IK link 时会额外乘其 IKRotation
+        //（UpdateLocalMatrix 的 `if (AddParent.IsIKLink && !IsAddLocal) result *= AddParent.IKRotation`），
+        // 因此这里必须把含 IK 的 rotation 作为最终值写回暂存。
+        _finalRotations[i] = rotation;
+        _finalTranslations[i] = translation;
+
+        // local = R · T（先绕骨原点旋转，再平移到父空间中的骨位置）
+        Matrix4x4 local = Matrix4x4.CreateFromQuaternion(rotation);
+        local.Translation = translation;
+
+        int parent = ParentIndices[i];
+        WorldMatrices[i] = parent >= 0 ? local * WorldMatrices[parent] : local;
+        SkinMatrices[i] = InverseBind[i] * WorldMatrices[i];
     }
 
     /// <summary>

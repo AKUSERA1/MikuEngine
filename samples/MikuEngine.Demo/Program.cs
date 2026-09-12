@@ -22,14 +22,15 @@ using MikuEngine.Engine;
 //          （静态绑定姿势下蒙皮矩阵是单位阵，不足以证明 skinning 正确）
 //   R    ：重置姿势
 //   动画（Mixer 多动效，Motion/ 下存在对应 VMD 时自动加载）：
-//     Motion.vmd=骨动效 | Lips.vmd=口型 | Eyes.vmd=视线（両目）| Facial.vmd=表情
+//     动作+IK.vmd（骨动效 + 足ＩＫ/つま先ＩＫ 目标 + 表情，单层播放）
+//     —— 原 Motion.vmd + Lips/Eyes/Facial 四层组合保留在 motionFiles 的注释里，需要时一行切回
 //   空格 ：暂停/播放 | ←/→ ：∓1 帧 | ↑/↓ ：帧率 ±6 | F ：回首帧 | V ：动画驱动开关
 //   [    ：把 test1.vmd 导入当前帧（任意帧导入演示） | ] ：移除导入层 | ; ：导入层权重循环 | ' ：层列表
 //
 // --smoke     ：无人值守自检。隐藏窗口跑 40 帧 → 强制开影模式 1 → 打印中间 RT 统计 → 退出。
 //               （跳过动画加载：自阴影/轮廓线这类多 pass 功能的"静默失效"没法靠肉眼看画面定位，
 //               靠这个把中间结果量化；动画会让模型动起来污染帧间差异统计）
-// --anim-smoke：无人值守播放验收。加载四层动效、隐藏窗口跑 90 帧、定期打印混合器状态后退出 ——
+// --anim-smoke：无人值守播放验收。加载动效、隐藏窗口跑 90 帧、定期打印混合器状态后退出 ——
 //               验收标准是「全程无异常 + 各层确实在驱动模型」。
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,28 @@ using MikuEngine.Engine;
 // 自阴影/轮廓线这类多 pass 功能的"静默失效"没法靠肉眼看画面定位，靠这个把中间结果量化。
 bool smoke = Array.Exists(args, a => a == "--smoke");
 bool animSmoke = Array.Exists(args, a => a == "--anim-smoke");
+// --ik-smoke：无人值守 IK 验收。只加载 Motion/动作+IK.vmd，隐藏窗口跑 N 帧，逐帧打印
+//   「目标(足ＩＫ) vs 被驱动端(足首) 的距离/高度差」——脚悬空会直接体现为这个距离下不去。
+//   --ik-dump=<path> 时，在第 --ik-frame=<N> 帧导出一份 JSON（rig + 姿势 + FK 世界 + IK 结果），
+//   供 tools/ik-oracle 的 reze-engine 求解器对拍。
+bool ikSmoke = Array.Exists(args,
+    a => a == "--ik-smoke" || a.StartsWith("--ik-smoke=", StringComparison.Ordinal));
+string? ikDumpPath = null;
+{
+    string? dumpArg = Array.Find(args, a => a.StartsWith("--ik-dump=", StringComparison.Ordinal));
+    if (dumpArg is not null) ikDumpPath = dumpArg["--ik-dump=".Length..];
+}
+int ikDumpFrame = 120;
+{
+    string? fArg = Array.Find(args, a => a.StartsWith("--ik-frame=", StringComparison.Ordinal));
+    if (fArg is not null && int.TryParse(fArg["--ik-frame=".Length..], out int f)) ikDumpFrame = f;
+}
+int ikSmokeFrames = 240;
+{
+    string? nArg = Array.Find(args, a => a.StartsWith("--ik-smoke=", StringComparison.Ordinal));
+    if (nArg is not null && int.TryParse(nArg["--ik-smoke=".Length..], out int n)) ikSmokeFrames = n;
+}
+bool headless = smoke || animSmoke || ikSmoke;
 string? pmxPath = Array.Find(args, a => !a.StartsWith("--", StringComparison.Ordinal)) ?? FindDefaultModel();
 if (pmxPath is null || !File.Exists(pmxPath))
 {
@@ -50,7 +73,7 @@ options.Size = new Silk.NET.Maths.Vector2D<int>(1100, 760);
 options.Title = $"MikuEngine GLES — {Path.GetFileName(pmxPath)}";
 options.WindowState = WindowState.Normal;
 options.VSync = true;
-options.IsVisible = !smoke && !animSmoke;   // smoke 模式不弹窗
+options.IsVisible = !headless;   // smoke / IK 验收模式不弹窗
 
 using var window = Window.Create(options);
 
@@ -161,7 +184,7 @@ window.Load += () =>
     // 帧号驱动：渲染帧只推进游标，采样是帧号的纯函数 —— 跳帧 / seek / 暂停都不动采样逻辑。
     // smoke 模式跳过（自阴影 A/B 校验和比较的是相邻帧画面，动画会让模型动起来污染差异统计）；
     // --anim-smoke 反其道行之：专门为「多层播放无异常」的无人值守验收而设。
-    if (smoke && !animSmoke)
+    if (smoke && !animSmoke && !ikSmoke)
     {
         Console.WriteLine("[Demo] --smoke：跳过 VMD 动画加载（避免污染自阴影帧间差异）");
     }
@@ -169,14 +192,13 @@ window.Load += () =>
     {
         timeline = new MmdTimeline { Loop = true };     // 舞曲播完回卷
 
-        // (文件名, 层说明)。Motion 是骨动效主体；Lips/Eyes/Facial 对应 MMD 的「表情」槽位。
-        // 四层的帧区间天然重合（≈0..833），全 Offset=0 同步播放。
+        // (文件名, 层说明)。默认加载「动作+IK.vmd」：骨动效 + 足ＩＫ/つま先ＩＫ 目标 + 表情
+        // 全在这一份里（IK 骨的位置轨道就是足ＩＫ 目标，Mixer 直接把它写进 IK 骨的局部平移）。
+        // 原四层组合保留备用 —— 想切回"Motion + 三个表情槽位分文件"的形态，把数组换回去即可：
+        //   ("Motion.vmd","骨动效"), ("Lips.vmd","口型"), ("Eyes.vmd","视线（両目）"), ("Facial.vmd","表情")
         var motionFiles = new (string File, string Desc)[]
         {
-            ("Motion.vmd", "骨动效"),
-            ("Lips.vmd",   "口型"),
-            ("Eyes.vmd",   "视线（両目）"),
-            ("Facial.vmd", "表情"),
+            ("动作+IK.vmd", "骨动效 + IK + 表情"),
         };
 
         int loadedLayers = 0;
@@ -454,6 +476,9 @@ window.FramebufferResize += size => device?.Resize(size.X, size.Y);
 
 int smokeFrame = 0;
 int animSmokeFrame = 0;
+int ikSmokeFrame = 0;
+double ikSmokeMaxErr = 0;
+string ikSmokeWorst = "-";
 bool animSmokeDiagPrinted = false;
 byte[]? smokeOn = null;        // 标准本影，影强度 1
 byte[]? smokeIsolated = null;  // 标准本影，影强度 0（cc≡0，隔离测试）
@@ -463,6 +488,15 @@ byte[]? smokeFloorOn = null;   // 影模式 2（含床影）
 window.Render += dt =>
 {
     if (smoke && ++smokeFrame > 40) { window.Close(); return; }
+    if (ikSmoke && ++ikSmokeFrame > ikSmokeFrames)
+    {
+        Console.WriteLine($"[ik-smoke] 结束：{ikSmokeFrames} 帧 | 全程最大末端误差 {ikSmokeMaxErr:F4}（{ikSmokeWorst}）");
+        Console.WriteLine(ikSmokeMaxErr < 1.0
+            ? "[ik-smoke] 判定：IK 收敛（最大误差 < 1 模型单位）—— 未出现「腿脚全程悬空」"
+            : "[ik-smoke] 判定：存在明显不收敛的链，需检查（见上方逐帧输出）");
+        window.Close();
+        return;
+    }
     if (animSmoke && ++animSmokeFrame > 90)
     {
         // 混合求值耗时统计（验收「播放无异常」之外的效率观测）
@@ -499,7 +533,10 @@ window.Render += dt =>
         //   传播并把骨 morph 折进局部 T/R —— 必须早于 PrepareFrame 的 UpdateWorldMatrices。
         if (timeline != null && animationEnabled)
         {
-            timeline.Advance(dt);
+            // --ik-smoke：按渲染帧号硬推进（不走 dt），保证导出帧可复现 —— 采样是帧号的纯函数，
+            // 帧号必须由外部给定，否则同一"渲染帧 120"在不同机器/负载下落在不同动画帧上。
+            if (ikSmoke) timeline.Seek(ikSmokeFrame - 1);
+            else timeline.Advance(dt);
             bool wasVisible = model.Model.Visible;
             var sw = System.Diagnostics.Stopwatch.StartNew();
             // Step 5d-4：时间轴推进 + 混合求值（活跃层采样 → 加权混合 → 可见性 AND → 整体写回）。
@@ -519,6 +556,19 @@ window.Render += dt =>
         // 阶段 0：帧首统一上传（重算蒙皮矩阵 + UBO + 蒙皮 SSBO），
         // 影图 pass 与主渲染都读同一份、且是本帧的最新值（修复了上一帧滞后的坑）。
         model.PrepareFrame(in frame);
+
+        // --ik-smoke：IK 验收。量化「目标（足ＩＫ）与实际被驱动端（足首）的距离」——
+        // 腿脚悬空会直接体现为这个距离下不去；Δy 为负说明踝低于目标（过冲/腿被压）。
+        if (ikSmoke && (ikSmokeFrame == 1 || ikSmokeFrame % 30 == 0 || ikSmokeFrame == ikDumpFrame))
+        {
+            double err = PrintIkDiagnostics(model.Model, timeline?.CurrentFrame ?? 0);
+            if (err > ikSmokeMaxErr) { ikSmokeMaxErr = err; ikSmokeWorst = $"渲染帧 {ikSmokeFrame}"; }
+        }
+        if (ikSmoke && ikDumpPath is not null && ikSmokeFrame == ikDumpFrame)
+        {
+            DumpIkJson(ikDumpPath, model.Model, timeline?.CurrentFrame ?? 0);
+            Console.WriteLine($"[ik-smoke] 已导出对拍数据：{ikDumpPath}");
+        }
 
         // 表情管线首次真正动起来时打一条诊断（证明「权重 → 稀疏累加 → 脏区上传」是活的）。
         if (!morphDiagPrinted && morphEnabled && model.MorphTouchedVertexCount > 0)
@@ -791,4 +841,115 @@ static string? FindMotionFile(string fileName)
 
     string fromCwd = Path.Combine(Directory.GetCurrentDirectory(), Relative.Replace('/', Path.DirectorySeparatorChar));
     return File.Exists(fromCwd) ? fromCwd : null;
+}
+
+// ── --ik-smoke 用：逐链打印「目标 vs 被驱动端」的距离与高度差 ────────────────
+// 判定"腿脚悬空"的直接指标：足ＩＫ 目标与足首之间的世界距离。IK 正常时它会收敛到 ~0；
+// 若全程停在模型身高量级（几十个单位），就是"腿够不到"（悬空）。
+static double PrintIkDiagnostics(SkeletalModel m, double frame)
+{
+    var chains = m.IkChains;
+    if (chains.Length == 0)
+    {
+        Console.WriteLine($"[ik-smoke] 帧 {frame,6:F1} | 该模型没有 IK 链（PmxIk 为空）");
+        return 0;
+    }
+
+    var sb = new System.Text.StringBuilder();
+    double maxErr = 0;
+    for (int c = 0; c < chains.Length; c++)
+    {
+        var ch = chains[c];
+        System.Numerics.Vector3 goal = m.WorldMatrices[ch.Goal].Translation;
+        System.Numerics.Vector3 driven = m.WorldMatrices[ch.Driven].Translation;
+        double err = System.Numerics.Vector3.Distance(goal, driven);
+        if (err > maxErr) maxErr = err;
+
+        // 链骨上累积的 IK 旋转角（度）。恒为 0 说明求解结果没留在 IkRotations 里，
+        // 那么打印出来的 err 其实是"FK 未解算"的距离（早期版本就是这样误报的）。
+        double rotDeg = 0;
+        foreach (var lk in ch.Links)
+        {
+            var q = m.IkRotations[lk.BoneIndex];
+            double d = 2.0 * System.Math.Acos(System.Math.Clamp(System.Math.Abs(q.W), 0.0, 1.0)) * 180.0 / System.Math.PI;
+            if (d > rotDeg) rotDeg = d;
+        }
+
+        if (c > 0) sb.Append(" | ");
+        sb.Append($"{m.BoneNames[ch.Goal]}→{m.BoneNames[ch.Driven]} {err:F4}(Δy {driven.Y - goal.Y,7:F3}, rot {rotDeg,5:F1}°)");
+    }
+    Console.WriteLine($"[ik-smoke] 帧 {frame,6:F1} | {sb}");
+    return maxErr;
+}
+
+// ── --ik-smoke --ik-dump= 用：导出对拍数据 ────────────────────────────────
+// 内容 = rig（名字/父/局部 T/R）+ 付与后的有效局部变换 + FK 世界 + IK 结果。
+// 「有效局部变换」是关键：它让 Node 侧不必复刻付与/軸制限，直接重放同一骨架即可对拍 IK 算法本身。
+static void DumpIkJson(string path, SkeletalModel m, double frame)
+{
+    static string F(float v) => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+    static string V3(System.Numerics.Vector3 v) => $"[{F(v.X)},{F(v.Y)},{F(v.Z)}]";
+    static string V4(System.Numerics.Quaternion q) => $"[{F(q.X)},{F(q.Y)},{F(q.Z)},{F(q.W)}]";
+
+    // ① FK 基准：关掉 IK 跑一次全量更新 → 得到「付与之后、IK 之前」的有效局部变换与 FK 世界位置。
+    bool saved = m.IkSolverEnabled;
+    m.IkSolverEnabled = false;
+    MmdIkSolver.Solve(m);
+    m.UpdateWorldMatrices();
+    var effRot = m.FinalRotations.ToArray();
+    var effTrans = m.FinalTranslations.ToArray();
+    var fkWorld = new System.Numerics.Vector3[m.BoneCount];
+    for (int i = 0; i < m.BoneCount; i++) fkWorld[i] = m.WorldMatrices[i].Translation;
+
+    // ② 开 IK 求解 → 记录每条链的结果与最终世界位置。
+    m.IkSolverEnabled = saved;
+    var results = new List<IkChainSolveResult>();
+    MmdIkSolver.Solve(m, results);
+    m.UpdateWorldMatrices();
+    var ikRot = (System.Numerics.Quaternion[])m.IkRotations.Clone();
+    var ikWorld = new System.Numerics.Vector3[m.BoneCount];
+    for (int i = 0; i < m.BoneCount; i++) ikWorld[i] = m.WorldMatrices[i].Translation;
+
+    var sb = new System.Text.StringBuilder();
+    sb.Append("{\n\"meta\":{");
+    sb.Append($"\"source\":\"MikuEngine\",\"frame\":{F((float)frame)},\"boneCount\":{m.BoneCount},");
+    sb.Append($"\"chainCount\":{m.IkChains.Length},\"solver\":\"PmxEditor IKTransform port\"}},\n");
+
+    sb.Append("\"bones\":[\n");
+    for (int i = 0; i < m.BoneCount; i++)
+    {
+        if (i > 0) sb.Append(",\n");
+        sb.Append($"{{\"i\":{i},\"name\":\"{m.BoneNames[i].Replace("\\", "\\\\").Replace("\"", "\\\"")}\",");
+        sb.Append($"\"parent\":{m.ParentIndices[i]},\"bindPos\":{V3(m.LocalPositions[i])},");
+        sb.Append($"\"localPos\":{V3(m.LocalTranslations[i])},\"localRot\":{V4(m.LocalRotations[i])},");
+        sb.Append($"\"effPos\":{V3(effTrans[i])},\"effRot\":{V4(effRot[i])},");
+        sb.Append($"\"fkWorld\":{V3(fkWorld[i])},\"ikWorld\":{V3(ikWorld[i])},");
+        sb.Append($"\"ikRot\":{V4(ikRot[i])}}}");
+    }
+    sb.Append("\n],\n");
+
+    sb.Append("\"ikChains\":[\n");
+    for (int c = 0; c < m.IkChains.Length; c++)
+    {
+        var ch = m.IkChains[c];
+        if (c > 0) sb.Append(",\n");
+        sb.Append($"{{\"index\":{c},\"goal\":{ch.Goal},\"driven\":{ch.Driven},");
+        sb.Append($"\"iteration\":{ch.Iteration},\"limitAngle\":{F(ch.LimitAngle)},");
+        sb.Append($"\"enabled\":{(m.IkEnabled[c] ? "true" : "false")},");
+        sb.Append($"\"iterationsUsed\":{(c < results.Count ? results[c].IterationsUsed : -1)},");
+        sb.Append($"\"errorSquared\":{(c < results.Count ? F(results[c].ErrorSquared) : "null")},");
+        sb.Append("\"links\":[");
+        for (int l = 0; l < ch.Links.Length; l++)
+        {
+            var lk = ch.Links[l];
+            if (l > 0) sb.Append(",");
+            sb.Append($"{{\"bone\":{lk.BoneIndex},\"hasLimit\":{(lk.HasLimitation ? "true" : "false")},");
+            sb.Append($"\"min\":{V3(lk.MinAngle)},\"max\":{V3(lk.MaxAngle)},");
+            sb.Append($"\"order\":{(int)lk.EulerOrder},\"fixAxis\":{(int)lk.FixAxis}}}");
+        }
+        sb.Append("]}");
+    }
+    sb.Append("\n]\n}\n");
+
+    File.WriteAllText(path, sb.ToString());
 }

@@ -422,6 +422,12 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         // 都读这一份，保证同帧内三个 pass 的可见性判定一致。
         ModelVisible = _model.Visible;
 
+        // IK 求解：必须早于世界矩阵重算 —— 求解器内部先跑一次 FK 全量更新（拿到被驱动端/目标的世界
+        // 坐标）并导出链骨基旋转，迭代中只在链骨子树增量重算，最终把结果写进 IkRotations；
+        // 下面这次 UpdateWorldMatrices 才把 IK 折进世界/蒙皮矩阵。顺序与 PmxEditor 的
+        // `UpdateLocalMatrix(ik:true)`（在骨骼矩阵推进途中顺手解 IK）语义等价。
+        MmdIkSolver.Solve(_model);
+
         _model.UpdateWorldMatrices();
         UploadFrame(in frame);
         _skin.BeginFrame();
