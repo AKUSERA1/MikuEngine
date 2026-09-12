@@ -46,6 +46,7 @@ public static class SkeletalModelConverter
         model.AppendRatios = new float[n];
         model.AppendRotate = new bool[n];
         model.AppendMove = new bool[n];
+        model.AppendIsLocal = new bool[n];
         model.AxisLimits = new Vector3[n];
         model.InverseBind = new Matrix4x4[n];
         model.WorldMatrices = new Matrix4x4[n];
@@ -80,6 +81,7 @@ public static class SkeletalModelConverter
                 model.AppendRatios[i] = System.Math.Clamp(a.Ratio, -1f, 1f);
                 model.AppendRotate[i] = (b.Flag & PmxBoneFlag.HasAppendRotate) != 0;
                 model.AppendMove[i] = (b.Flag & PmxBoneFlag.HasAppendMove) != 0;
+                model.AppendIsLocal[i] = (b.Flag & PmxBoneFlag.LocalAppendTransform) != 0;
             }
 
             // 軸制限：存归一化轴，Zero 表示无限制（腕捩/手捩用）。

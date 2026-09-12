@@ -187,9 +187,8 @@ public sealed class SkeletalModel
     /// <summary>是否继承平移（PMX 骨标志 bit9 / 0x0200）。</summary>
     public bool[] AppendMove = Array.Empty<bool>();
 
-    // 边界：PMX 骨标志 bit7（LocalAppendTransform）表示「取付与亲的世界变换」而非默认的
-    // 「取付与亲的局部变换」。本模型没有任何骨置位该标志，因此该分支未实现 ——
-    // 与 babylon-mmd AppendTransformSolver 的 isLocal 分支等价，日后遇到置位模型再补。
+    /// <summary>付与变换是否取「付与亲的世界变换」而非默认的「局部变换」（PMX 骨标志 bit7 / 0x0080）。</summary>
+    public bool[] AppendIsLocal = Array.Empty<bool>();
 
     /// <summary>軸制限轴（<b>已归一化</b>；<see cref="Vector3.Zero"/> = 无限制）。带限制的骨只能绕该轴旋转。</summary>
     public Vector3[] AxisLimits = Array.Empty<Vector3>();
@@ -279,16 +278,32 @@ public sealed class SkeletalModel
                 rotation = ProjectOntoAxis(rotation, axis);
 
             // ── 付与（append transform）─────────────────────────────────────
-            // 继承的是源骨的「最终」局部变换（源骨自己的付与已算完），且源骨的偏移量
-            // 取「当前局部平移 − 绑定局部平移」（即动效偏移），不是绝对位置。
+            // 继承的是源骨的「最终」变换（源骨自己的付与已算完）。
+            //   * 默认（局部模式）：旋转取源骨最终局部旋转 _finalRotations[src]，
+            //     平移取「当前局部平移 − 绑定局部平移」（即动效偏移）。
+            //   * 世界模式（PMX 骨标志 bit7 LocalAppendTransform）：旋转取源骨的最终【世界】旋转，
+            //     平移取源骨原点相对绑定姿势的【世界】位移（World · InverseBind 的平移）。
+            //     与 babylon-mmd AppendTransformSolver 的 isLocal 分支逐式等价。
             int src = AppendSources[i];
             if (src >= 0)
             {
+                float ratio = AppendRatios[i];
+
                 if (AppendRotate[i])
-                    rotation = rotation * AppendRotation(_finalRotations[src], AppendRatios[i]);
+                {
+                    Quaternion srcRot = AppendIsLocal[i]
+                        ? WorldRotationOf(src)
+                        : _finalRotations[src];
+                    rotation = rotation * AppendRotation(srcRot, ratio);
+                }
 
                 if (AppendMove[i])
-                    translation += (_finalTranslations[src] - LocalPositions[src]) * AppendRatios[i];
+                {
+                    Vector3 srcOffset = AppendIsLocal[i]
+                        ? WorldDisplacementOf(src)
+                        : _finalTranslations[src] - LocalPositions[src];
+                    translation += srcOffset * ratio;
+                }
             }
 
             _finalRotations[i] = rotation;
@@ -332,5 +347,24 @@ public sealed class SkeletalModel
         }
         if (ratio >= 1f) return q;
         return Quaternion.Slerp(Quaternion.Identity, q, ratio);
+    }
+
+    /// <summary>
+    /// 源骨的最终世界旋转（rigid 世界矩阵直接取旋转分量）。仅世界模式付与（bit7）使用，
+    /// <see cref="WorldMatrices"/> 此时已含源骨自身的軸制限与付与，故等价于 babylon-mmd 的
+    /// <c>Quaternion.FromRotationMatrix(targetBoneWorldMatrix)</c>。
+    /// </summary>
+    private Quaternion WorldRotationOf(int src)
+        => Quaternion.CreateFromRotationMatrix(WorldMatrices[src]);
+
+    /// <summary>
+    /// 源骨原点相对绑定姿势的世界位移 = <c>World · InverseBind</c> 的平移分量。仅世界模式付与（bit7）使用，
+    /// 逐式等价于 babylon-mmd 的 <c>worldMatrix · absoluteInverseBindMatrix</c> 平移
+    /// （行主序约定下 translation = World.Translation + World.Linear · InverseBind.Translation）。
+    /// </summary>
+    private Vector3 WorldDisplacementOf(int src)
+    {
+        Matrix4x4 disp = WorldMatrices[src] * InverseBind[src];
+        return disp.Translation;
     }
 }
