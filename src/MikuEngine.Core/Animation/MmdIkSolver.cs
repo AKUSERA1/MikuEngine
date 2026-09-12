@@ -53,6 +53,17 @@ public static class MmdIkSolver
     public static readonly bool IgnoreLimitations =
         System.Environment.GetEnvironmentVariable("MIKU_IK_NO_LIMIT") == "1";
 
+    // ── F3（设计文档附录 F）：angleDot<0 反向钳 ────────────────────────────
+    // 目标落在反向半球（toTarget·toIk < 0）时，acos 给出 90°~180° 的巨大单步转角，
+    // CCD 会试图一步把腿甩过去（"腿被吸走/翻转"）。MMD 解析式从不提议越界转角，
+    // 该钳把反向一步封顶到 LimitAngle（去掉 (linkIndex+1) 的逐级放大）。
+    // 来源：修改版 CCDIKSolver.js 独有改动 #7；env: MIKU_IK_NO_REVERSE_CLAMP=1 关闭（A/B 对照）。
+    public static readonly bool ReverseClamp =
+        System.Environment.GetEnvironmentVariable("MIKU_IK_NO_REVERSE_CLAMP") != "1";
+
+
+
+
     /// <summary>
     /// 求解全部 IK 链。必须在「动画已写入局部 T/R（含骨 morph）」之后、
     /// 「最后一次 <see cref="SkeletalModel.UpdateWorldMatrices"/>」之前调用。
@@ -126,6 +137,7 @@ public static class MmdIkSolver
 
         return new IkChainSolveResult(true, used, err);
     }
+
 
     /// <summary>
     /// 单根链骨（<c>PmxEditorLib:74820 IKProc_Link</c>）。
@@ -201,8 +213,14 @@ public static class MmdIkSolver
 
         if (axis.LengthSquared() < AxisEpsilonSq) return;
 
-        float dot = System.Math.Clamp(Vector3.Dot(toTarget, toIk), -1f, 1f);
-        float angle = MathF.Min(MathF.Acos(dot), chain.LimitAngle * (linkIndex + 1));
+        // F3 反向钳：目标在反向半球时封顶到 LimitAngle（去掉逐级放大）。
+        // 注意必须在 clamp 前取原始 dot 判断半球；正常半球保持 PE 的 (linkIndex+1) 预算不变。
+        float angleDot = Vector3.Dot(toTarget, toIk);
+        float dot = System.Math.Clamp(angleDot, -1f, 1f);
+        float budget = chain.LimitAngle * (linkIndex + 1);
+        if (ReverseClamp && angleDot < 0f)
+            budget = System.Math.Min(budget, chain.LimitAngle);
+        float angle = MathF.Min(MathF.Acos(dot), budget);
         model.IkRotations[bone] *= Quaternion.CreateFromAxisAngle(axis, angle);
 
         if (limited)
@@ -211,7 +229,7 @@ public static class MmdIkSolver
             Quaternion basis = model.IkLinkBaseRotations[bone];
             Matrix4x4 m = Matrix4x4.CreateFromQuaternion(basis * model.IkRotations[bone]);
             Vector3 euler = ExtractEuler(m, link.EulerOrder);
-            LimitAngles(ref euler, link, axisLim);
+            LimitAngles(ref euler, link.MinAngle, link.MaxAngle, axisLim);
             model.IkRotations[bone] = Quaternion.Inverse(basis) * Rebuild(euler, link.EulerOrder);
         }
 
@@ -287,10 +305,8 @@ public static class MmdIkSolver
     /// 角度限制（<c>PmxEditorLib:74968 LimitAngle</c>）：越界时用 <c>2*bound − angle</c> 反射回弹，
     /// 仅当前半段迭代（<paramref name="axisLim"/>）允许回弹；否则硬钳到边界。
     /// </summary>
-    private static void LimitAngles(ref Vector3 e, MmdIkLink link, bool axisLim)
+    private static void LimitAngles(ref Vector3 e, Vector3 low, Vector3 high, bool axisLim)
     {
-        Vector3 low = link.MinAngle;
-        Vector3 high = link.MaxAngle;
 
         if (e.X < low.X)
         {

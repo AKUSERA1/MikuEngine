@@ -59,6 +59,14 @@ int ikSmokeFrames = 240;
     string? nArg = Array.Find(args, a => a.StartsWith("--ik-smoke=", StringComparison.Ordinal));
     if (nArg is not null && int.TryParse(nArg["--ik-smoke=".Length..], out int n)) ikSmokeFrames = n;
 }
+// --ik-bake-dump=<path>：随 --ik-smoke 逐动画帧记录「IK 相关骨的最终局部旋转」
+//   （= FinalRotations，已含 IK 叠加；与 MMD bake 语义一致），结束时写一份 JSON，
+//   供 tools/ik-oracle/cmp_baked.py 与 mmdbridge 烘焙出的 baked.vmd 逐帧对拍。
+string? ikBakeDumpPath = null;
+{
+    string? bArg = Array.Find(args, a => a.StartsWith("--ik-bake-dump=", StringComparison.Ordinal));
+    if (bArg is not null) ikBakeDumpPath = bArg["--ik-bake-dump=".Length..];
+}
 bool headless = smoke || animSmoke || ikSmoke;
 string? pmxPath = Array.Find(args, a => !a.StartsWith("--", StringComparison.Ordinal)) ?? FindDefaultModel();
 if (pmxPath is null || !File.Exists(pmxPath))
@@ -479,6 +487,10 @@ int animSmokeFrame = 0;
 int ikSmokeFrame = 0;
 double ikSmokeMaxErr = 0;
 string ikSmokeWorst = "-";
+// bake 对拍记录：骨名表 + 每帧 (动画帧号, 四元数组)。仅在 --ik-bake-dump 时填充。
+string[] ikBakeNames = Array.Empty<string>();
+int[] ikBakeIdx = Array.Empty<int>();
+var ikBakeFrames = new List<(int F, System.Numerics.Quaternion[] Q, System.Numerics.Vector3[] P)>();
 bool animSmokeDiagPrinted = false;
 byte[]? smokeOn = null;        // 标准本影，影强度 1
 byte[]? smokeIsolated = null;  // 标准本影，影强度 0（cc≡0，隔离测试）
@@ -494,6 +506,11 @@ window.Render += dt =>
         Console.WriteLine(ikSmokeMaxErr < 1.0
             ? "[ik-smoke] 判定：IK 收敛（最大误差 < 1 模型单位）—— 未出现「腿脚全程悬空」"
             : "[ik-smoke] 判定：存在明显不收敛的链，需检查（见上方逐帧输出）");
+        if (ikBakeDumpPath is not null)
+        {
+            DumpBakeJson(ikBakeDumpPath, ikBakeNames, ikBakeFrames);
+            Console.WriteLine($"[ik-smoke] 已导出 bake 对拍数据：{ikBakeDumpPath}（{ikBakeFrames.Count} 帧 × {ikBakeNames.Length} 骨）");
+        }
         window.Close();
         return;
     }
@@ -568,6 +585,26 @@ window.Render += dt =>
         {
             DumpIkJson(ikDumpPath, model.Model, timeline?.CurrentFrame ?? 0);
             Console.WriteLine($"[ik-smoke] 已导出对拍数据：{ikDumpPath}");
+        }
+
+        // --ik-bake-dump：PrepareFrame 之后（世界矩阵已含 IK 叠加）记录最终局部旋转。
+        // 最终局部旋转 = FinalRotations（动画+軸制限+付与+IK 叠加，RecomputeBone 内
+        // base *= IkRotations 后写入），与 MMD 烘焙进 VMD 的「最终状态」同一语义
+        // （PMX 骨绑定局部旋转恒为单位阵）。
+        if (ikSmoke && ikBakeDumpPath is not null && model.Model.BoneCount > 0)
+        {
+            if (ikBakeIdx.Length == 0) (ikBakeNames, ikBakeIdx) = SelectIkBakeBones(model.Model);
+            var qs = new System.Numerics.Quaternion[ikBakeIdx.Length];
+            var ps = new System.Numerics.Vector3[ikBakeIdx.Length];
+            for (int b = 0; b < ikBakeIdx.Length; b++)
+            {
+                int bi = ikBakeIdx[b];
+                // FinalRotations 已含 IkRotations（RecomputeBone 内 base *= ik 后写入），
+                // 直接记录即为最终局部旋转 —— 不可再乘一次 IkRotations（会把链骨角度记成 2 倍）。
+                qs[b] = System.Numerics.Quaternion.Normalize(model.Model.FinalRotations[bi]);
+                ps[b] = model.Model.WorldMatrices[bi].Translation;
+            }
+            ikBakeFrames.Add((ikSmokeFrame - 1, qs, ps));
         }
 
         // 表情管线首次真正动起来时打一条诊断（证明「权重 → 稀疏累加 → 脏区上传」是活的）。
@@ -910,6 +947,10 @@ static void DumpIkJson(string path, SkeletalModel m, double frame)
     var ikWorld = new System.Numerics.Vector3[m.BoneCount];
     for (int i = 0; i < m.BoneCount; i++) ikWorld[i] = m.WorldMatrices[i].Translation;
 
+    // 求值序位置（诊断付与排序问题用）：deformPos[i] = DeformOrder 中的名次。
+    var deformPos = new int[m.BoneCount];
+    for (int k = 0; k < m.DeformOrder.Length; k++) deformPos[m.DeformOrder[k]] = k;
+
     var sb = new System.Text.StringBuilder();
     sb.Append("{\n\"meta\":{");
     sb.Append($"\"source\":\"MikuEngine\",\"frame\":{F((float)frame)},\"boneCount\":{m.BoneCount},");
@@ -924,7 +965,9 @@ static void DumpIkJson(string path, SkeletalModel m, double frame)
         sb.Append($"\"localPos\":{V3(m.LocalTranslations[i])},\"localRot\":{V4(m.LocalRotations[i])},");
         sb.Append($"\"effPos\":{V3(effTrans[i])},\"effRot\":{V4(effRot[i])},");
         sb.Append($"\"fkWorld\":{V3(fkWorld[i])},\"ikWorld\":{V3(ikWorld[i])},");
-        sb.Append($"\"ikRot\":{V4(ikRot[i])}}}");
+        sb.Append($"\"ikRot\":{V4(ikRot[i])},");
+        sb.Append($"\"deformPos\":{deformPos[i]},\"appendSrc\":{m.AppendSources[i]},");
+        sb.Append($"\"axisLim\":{V3(m.AxisLimits[i])}}}");
     }
     sb.Append("\n],\n");
 
@@ -951,5 +994,65 @@ static void DumpIkJson(string path, SkeletalModel m, double frame)
     }
     sb.Append("\n]\n}\n");
 
+    File.WriteAllText(path, sb.ToString());
+}
+
+// ── --ik-bake-dump 用：选骨 + 写 bake 对拍 JSON ──────────────────────────────
+// 选骨集合 = 所有 IK 链的 Goal/Driven/Link 骨 ∪ 名字含 足/ひざ/つま先/高跟鞋/鉤 的骨
+// （后者覆盖 MMD 解析式足 IK 会写、但不在任何 PMX 链里的骨，如 つま先/足D —— 诊断用）。
+static (string[] Names, int[] Idx) SelectIkBakeBones(SkeletalModel m)
+{
+    var set = new SortedSet<int>();
+    foreach (var ch in m.IkChains)
+    {
+        set.Add(ch.Goal);
+        set.Add(ch.Driven);
+        foreach (var lk in ch.Links) set.Add(lk.BoneIndex);
+    }
+    for (int i = 0; i < m.BoneCount; i++)
+    {
+        string n = m.BoneNames[i];
+        if (n.Contains('足') || n.Contains("ひざ") || n.Contains("つま先") || n.Contains("高跟鞋") || n.Contains('鉤'))
+            set.Add(i);
+    }
+    int[] idx = set.ToArray();
+    return (idx.Select(i => m.BoneNames[i]).ToArray(), idx);
+}
+
+static void DumpBakeJson(string path, string[] names, List<(int F, System.Numerics.Quaternion[] Q, System.Numerics.Vector3[] P)> frames)
+{
+    static string F(float v) => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+    var sb = new System.Text.StringBuilder(1 << 22);
+    sb.Append("{\"meta\":{\"source\":\"MikuEngine\",\"kind\":\"final-local-rotations\",");
+    sb.Append("\"compose\":\"FinalRotations (already includes IkRotations)\",\"boneCount\":").Append(names.Length);
+    sb.Append(",\"frameCount\":").Append(frames.Count).Append("},\n\"bones\":[");
+    for (int i = 0; i < names.Length; i++)
+    {
+        if (i > 0) sb.Append(',');
+        sb.Append('"').Append(names[i].Replace("\\", "\\\\").Replace("\"", "\\\"")).Append('"');
+    }
+    sb.Append("],\n\"frames\":[\n");
+    for (int f = 0; f < frames.Count; f++)
+    {
+        if (f > 0) sb.Append(",\n");
+        sb.Append("{\"f\":").Append(frames[f].F).Append(",\"r\":[");
+        var qs = frames[f].Q;
+        for (int b = 0; b < qs.Length; b++)
+        {
+            if (b > 0) sb.Append(',');
+            var q = qs[b];
+            sb.Append('[').Append(F(q.X)).Append(',').Append(F(q.Y)).Append(',')
+              .Append(F(q.Z)).Append(',').Append(F(q.W)).Append(']');
+        }
+        sb.Append("],\"p\":[");
+        var p3 = frames[f].P;
+        for (int b = 0; b < p3.Length; b++)
+        {
+            if (b > 0) sb.Append(',');
+            sb.Append('[').Append(F(p3[b].X)).Append(',').Append(F(p3[b].Y)).Append(',').Append(F(p3[b].Z)).Append(']');
+        }
+        sb.Append("]}");
+    }
+    sb.Append("\n]}\n");
     File.WriteAllText(path, sb.ToString());
 }

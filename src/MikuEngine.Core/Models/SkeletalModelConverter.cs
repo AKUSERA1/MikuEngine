@@ -106,8 +106,10 @@ public static class SkeletalModelConverter
 
             // 付与（append transform）：源骨必须存在；比率钳到 [-1, 1]（PMX 允许负值，
             // -1 表示反向抵消）。PMX 只在 HasAppendRotate / HasAppendMove 之一置位时才算付与。
+            // 自付与（付与源 = 自己，真实模型里存在，如石英式的玩具骨）按 MMD 语义视为
+            // no-op —— MMD 在烘焙验证中对该情形输出 identity（baked.vmd 实测）。
             model.AppendSources[i] = -1;
-            if (b.AppendTransform is { } a && (uint)a.ParentIndex < (uint)n)
+            if (b.AppendTransform is { } a && (uint)a.ParentIndex < (uint)n && a.ParentIndex != i)
             {
                 model.AppendSources[i] = a.ParentIndex;
                 model.AppendRatios[i] = System.Math.Clamp(a.Ratio, -1f, 1f);
