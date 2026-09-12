@@ -70,6 +70,16 @@ public sealed class SkeletalModel
     /// </summary>
     public const int VertexStride = 52;
 
+    /// <summary>
+    /// 整模型可见性（VMD 表示枠的求值结果），默认 true。
+    ///
+    /// false ⇒ 渲染层跳过<b>主渲染 + 轮廓线 + 自阴影 caster</b> 三个 pass
+    /// （与 reze-engine <c>Model.setVisible</c> 的语义一致）；拾取不受影响，本引擎无物理故不涉及。
+    /// 由动画层每帧写入（单动效 <c>MmdAnimation.SampleVisible</c>，
+    /// 多动效为各活跃层按 AND 合并）；静态预览恒为 true。
+    /// </summary>
+    public bool Visible = true;
+
     // ── 几何 ───────────────────────────────────────────────────────────
     public byte[] VertexData = Array.Empty<byte>();
     public int VertexCount;

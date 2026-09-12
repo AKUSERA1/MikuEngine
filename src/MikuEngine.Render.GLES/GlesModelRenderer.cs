@@ -105,6 +105,13 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     /// <summary>轮廓线开关（对应 PmxEditor 的 chkEdge）。默认开。</summary>
     public bool EdgeVisible { get; set; } = true;
 
+    /// <summary>
+    /// 本帧的模型可见性 —— 在 <see cref="PrepareFrame"/> 从 <c>SkeletalModel.Visible</c> 采样，
+    /// 供 <see cref="Draw"/> / <see cref="DrawEdges"/> / 影图 caster 共用同一份「本帧快照」。
+    /// false 时三个 pass 全部早退（表示枠「非表示」）。
+    /// </summary>
+    public bool ModelVisible { get; private set; } = true;
+
     /// <summary>自阴影开关（对应 MMD 影模式 1/2，0=关）。默认关闭。</summary>
     public int SelfShadowMode { get; set; } = 0;
 
@@ -411,6 +418,10 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     /// </summary>
     public void PrepareFrame(in FrameUniforms frame)
     {
+        // 表示枠（VMD property）结果在本帧内固定：先取快照，后续 Draw / 轮廓线 / 影图 caster
+        // 都读这一份，保证同帧内三个 pass 的可见性判定一致。
+        ModelVisible = _model.Visible;
+
         _model.UpdateWorldMatrices();
         UploadFrame(in frame);
         _skin.BeginFrame();
@@ -427,6 +438,10 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     /// <param name="toonMode">0=无 1=MMD toon 2=固有（PE 的 ToonMode）</param>
     public void Draw(in FrameUniforms frame, float toonMode = 1f)
     {
+        // 表示枠「非表示」：主渲染与轮廓线一起跳过。此处尚无任何 GL 状态改动，
+        // 直接返回不会污染 grid / 其它渲染器（Draw 末尾的状态还原也无需执行）。
+        if (!ModelVisible) return;
+
         uToonMode = toonMode;
         var gl = _device.Gl;
 
@@ -549,6 +564,8 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     /// </summary>
     private void DrawEdges()
     {
+        if (!ModelVisible) return;   // 与 Draw 同一份本帧快照（Draw 已早退，这里是防御性重复）
+
         var gl = _device.Gl;
         gl.UseProgram(_edgeProgram);
         gl.Uniform1(_locEdgeSkinMatBase, (float)SkinMatrixBaseOffset);

@@ -446,8 +446,8 @@ public class MmdAnimationTests
     {
         var anim = MmdAnimation.FromVmd(ParseRealVmd());
 
-        Assert.NotEmpty(anim.BoneTracks);
-        Assert.NotEmpty(anim.MorphTracks);
+        // demo 资源可被整体替换（骨动效 / 纯表情动效都可能），只要求「有什么轨道就严格升序」
+        Assert.True(anim.BoneTracks.Length + anim.MorphTracks.Length > 0, "没有任何轨道");
         foreach (var track in anim.BoneTracks)
             for (int i = 1; i < track.Frames.Length; i++)
                 Assert.True(track.Frames[i - 1] < track.Frames[i], $"{track.Name} 帧号非严格升序");

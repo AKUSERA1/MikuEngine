@@ -7,13 +7,14 @@ namespace MikuEngine.Core.Tests;
 
 /// <summary>
 /// VMD 解析器对照测试：以 babylon-mmd 解析器（经 TestData/gen_vmd_golden.mjs 移植执行）的
-/// 解析结果为权威基准，对 samples/MikuEngine.Demo/Motion/Motion.vmd 做 5 个层级断言：
+/// 解析结果为权威基准，对 samples/MikuEngine.Demo/Motion/Motion.vmd 做 6 个层级断言：
 ///
 ///   1. 计数 / 分区偏移             —— 结构定位正确
 ///   2. 分区原始字节 FNV-1a64        —— 分区边界逐字节正确
 ///   3. 全量关键帧规范流 FNV-1a64    —— 每一帧的每一字节（名字原始字节/帧号/浮点比特位/插值）正确
 ///   4. 确定性抽样全字段             —— 指纹之外的逐字段冗余校验
 ///   5. 轨道聚合                     —— 原始字节键控的分组 / 计数 / 首末帧
+///   6. property（表示枠）键          —— 帧号 / 可见性 / IK 开关列表 + property 分区字节哈希
 ///
 /// 名字以【原始字节】为权威基准（断言 nameRaw / modelNameRaw 逐字节一致）。
 /// 解码字符串不与 babylon 直接对齐：WHATWG(shift-jis) 与 .NET 932 对非标准字节
@@ -181,6 +182,57 @@ public class VmdParserTests
             FnvHex(SectionHash(file, m.BoneSectionOffset, m.BoneSectionBytes)));
         Assert.Equal(g.GetProperty("sections").GetProperty("morphFnv").GetString(),
             FnvHex(SectionHash(file, m.MorphSectionOffset, m.MorphSectionBytes)));
+    }
+
+    // ---------------------------------------------------------------- 2b. property（表示枠）键
+
+    /// <summary>
+    /// property 键的全字段对照：帧号、可见性（<c>byte != 0 ⇒ 可见</c>）、
+    /// 每条 IK 开关（原始字节名 + 启用位），以及 property 分区的定位与原始字节哈希。
+    /// </summary>
+    [Fact]
+    public void PropertyKeys_MatchGolden()
+    {
+        var g = Golden();
+        var m = ParseRealVmd();
+        var file = File.ReadAllBytes(VmdPath);
+
+        Assert.Equal(g.GetProperty("counts").GetProperty("property").GetInt32(), m.PropertyKeyCount);
+        Assert.Equal(m.PropertyKeyCount, m.PropertyKeys.Count);
+
+        var expected = g.GetProperty("propertyKeys").EnumerateArray().ToArray();
+        Assert.Equal(expected.Length, m.PropertyKeys.Count);
+
+        int checkedIkStates = 0;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            var e = expected[i];
+            var k = m.PropertyKeys[i];
+
+            Assert.Equal(e.GetProperty("frame").GetInt32(), k.Frame);
+            Assert.Equal(e.GetProperty("visible").GetBoolean(), k.Visible);
+
+            var ik = e.GetProperty("ikStates").EnumerateArray().ToArray();
+            Assert.Equal(ik.Length, k.IkStates.Length);
+            for (int j = 0; j < ik.Length; j++)
+            {
+                // 原始字节是权威标识（解码字符串随解码器风味变化，只在 golden 干净时对齐）
+                Assert.Equal(ik[j].GetProperty("nameRaw").GetString(), Hex(k.IkStates[j].NameRaw));
+                Assert.Equal(ik[j].GetProperty("enabled").GetBoolean(), k.IkStates[j].Enabled);
+                if (GoldenNameIsClean(ik[j].GetProperty("name").GetString()!))
+                    Assert.Equal(ik[j].GetProperty("name").GetString(), k.IkStates[j].BoneName);
+                checkedIkStates++;
+            }
+        }
+        // 「golden 里每条 IK 开关都必须被实际核对过」—— 数量由 golden 自身决定（fixture 可被整体替换）
+        int expectedIkStates = expected.Sum(e => e.GetProperty("ikStates").GetArrayLength());
+        Assert.Equal(expectedIkStates, checkedIkStates);
+
+        var s = g.GetProperty("sections");
+        Assert.Equal(s.GetProperty("propertyOffset").GetInt32(), m.PropertySectionOffset);
+        Assert.Equal(s.GetProperty("propertyBytes").GetInt32(), m.PropertySectionBytes);
+        Assert.Equal(s.GetProperty("propertyFnv").GetString(),
+            FnvHex(SectionHash(file, m.PropertySectionOffset, m.PropertySectionBytes)));
     }
 
     // ---------------------------------------------------------------- 3. 全量规范流指纹（241,460 + 17,686 帧 × 每字节）

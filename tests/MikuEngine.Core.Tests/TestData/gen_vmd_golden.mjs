@@ -2,7 +2,8 @@
 // VMD golden 数据生成器 —— 解析逻辑逐行移植自 babylon-mmd：
 //   esm/Loader/Parser/vmdObject.js       (VmdData.CheckedCreate / BoneKeyFrame / MorphKeyFrame)
 //   esm/Loader/Parser/mmdDataDeserializer.js (getDecoderString / getUint32 / getFloat32Tuple)
-// 产出：counts + 分区原始字节 FNV-1a64 + 全量键规范流 FNV-1a64 + 轨道聚合 + 确定性抽样全字段。
+// 产出：counts + 分区原始字节 FNV-1a64（bone / morph / property）+
+//       全量键规范流 FNV-1a64 + 轨道聚合 + property（表示枠）键 + 确定性抽样全字段。
 // C# 侧 VmdParser 必须与这里的每一个数字 / 字节 / 比特位一致。
 //
 // 用法: node gen_vmd_golden.mjs <vmdPath> <outJsonPath>
@@ -121,17 +122,29 @@ if (ds.bytesAvailable !== 0) {
 }
 
 let propertyKeyFrameCount = 0;
+let propertyOffset = 0, propertyBytes = 0;
+const propertyKeys = [];
 if (ds.bytesAvailable !== 0) {
   if (ds.bytesAvailable < 4) throw new Error("缺 propertyKeyFrameCount");
   propertyKeyFrameCount = ds.getUint32();
+  propertyOffset = ds.offset;
   for (let i = 0; i < propertyKeyFrameCount; ++i) {
     if (ds.bytesAvailable < PROPERTY_BASE_BYTES) throw new Error("property 帧越界");
-    ds.offset += PROPERTY_BASE_BYTES;
+    const frameNumber = ds.getUint32();
+    const visible = ds.getUint8() !== 0;          // babylon：byte != 0 ⇒ 可见
     if (ds.bytesAvailable < 4) throw new Error("缺 ikStateCount");
     const ikStateCount = ds.getUint32();
     if (ds.bytesAvailable < ikStateCount * IK_STATE_BYTES) throw new Error("ikState 区越界");
-    ds.offset += ikStateCount * IK_STATE_BYTES;
+    const ikStates = [];
+    for (let j = 0; j < ikStateCount; ++j) {
+      const rawBytes = ds.u8.subarray(ds.offset, ds.offset + 20);
+      const ikName = ds.getDecoderString(20, true);
+      const ikEnabled = ds.getUint8() !== 0;
+      ikStates.push({ name: ikName, nameRaw: hex(trimName(rawBytes)), enabled: ikEnabled });
+    }
+    propertyKeys.push({ frame: frameNumber, visible, ikStates });
   }
+  propertyBytes = ds.offset - propertyOffset;
 }
 const leftoverBytes = ds.bytesAvailable;
 if (leftoverBytes > 0) console.warn(`警告: 解析后剩余 ${leftoverBytes} 字节`);
@@ -140,6 +153,7 @@ if (leftoverBytes > 0) console.warn(`警告: 解析后剩余 ${leftoverBytes} �
 const u8all = new Uint8Array(ab);
 const boneFnv = fnvUpdate(FNV_OFFSET, u8all.subarray(boneOffset, boneOffset + boneKeyFrameCount * BONE_KF_BYTES));
 const morphFnv = fnvUpdate(FNV_OFFSET, u8all.subarray(morphOffset, morphOffset + morphKeyFrameCount * MORPH_KF_BYTES));
+const propertyFnv = fnvUpdate(FNV_OFFSET, u8all.subarray(propertyOffset, propertyOffset + propertyBytes));
 
 // —— 全量键解析（文件顺序）+ 轨道聚合 + 规范流哈希 ——
 // 名字处理：原始字节是权威（WHATWG 与 .NET 932 对非标准 Shift-JIS 字节映射不同，
@@ -247,10 +261,12 @@ const golden = {
   sections: {
     boneOffset, boneBytes: boneKeyFrameCount * BONE_KF_BYTES, boneFnv: fnvHex(boneFnv),
     morphOffset, morphBytes: morphKeyFrameCount * MORPH_KF_BYTES, morphFnv: fnvHex(morphFnv),
+    propertyOffset, propertyBytes, propertyFnv: fnvHex(propertyFnv),
   },
   streamFnv: fnvHex(streamHash),
   boneTracks: aggregate(boneKeys),
   morphTracks: aggregate(morphKeys),
+  propertyKeys,
   sampledBoneKeys,
   sampledMorphKeys,
 };

@@ -289,6 +289,23 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
     {
         if (Mode == ShadowMode.Off) return;
         var gl = device.Gl;
+
+        // 表示枠「非表示」：跳过 caster（模型不可见就不该投影）。
+        // 注意 Z 图是自阴影接收侧与床影<b>共享</b>的资源，只早退会留下上一帧的深度 ——
+        // 屏幕上仍会出现一个已经不可见的模型的影子。因此这里清空深度再退
+        // （reze-engine 是整 pass 跳过；本引擎有床影共用同一张图，故多一步 clear）。
+        if (!model.ModelVisible)
+        {
+            gl.BindFramebuffer(FramebufferTarget.Framebuffer, _zFbo);
+            gl.Viewport(0, 0, (uint)_size, (uint)_size);
+            gl.DepthMask(true);                 // glClear 受深度写掩码影响，显式置位
+            gl.ClearDepth(1f);                  // 空处 z=1（采样即「不在影里」）
+            gl.Clear(ClearBufferMask.DepthBufferBit);
+            gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+            gl.Viewport(0, 0, (uint)viewW, (uint)viewH);
+            return;
+        }
+
         var m = model.Model;
         int baseOffset = model.SkinMatrixBaseOffset;
         AttachModelBuffers(model.FrameUbo, model.SkinSsbo);

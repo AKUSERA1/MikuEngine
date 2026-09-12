@@ -242,6 +242,42 @@ public sealed class MmdMorphTrack
 }
 
 /// <summary>
+/// property（表示枠）轨道：整模型显示 / 非表示的<b>阶梯</b>轨道。
+///
+/// 表示枠是离散状态，因此键与键之间<b>保持</b>、绝不插值；帧号早于首键时返回 true（可见）——
+/// 未声明「非表示」的动效应照常渲染。IK 开关随键保留（<see cref="IkStates"/>），
+/// 本引擎无 IK ⇒ 不消费。
+///
+/// 与骨骼 / morph 轨道不同，本轨道是<b>整模型</b>量，不参与「按模型绑定」的过滤。
+/// </summary>
+public sealed class MmdPropertyTrack
+{
+    /// <summary>帧号，严格升序。</summary>
+    public int[] Frames = [];
+
+    /// <summary>每键的可见性（true = 显示 / false = 非表示）。</summary>
+    public bool[] Visibles = [];
+
+    /// <summary>每键附带的 IK 开关（解析保留、不消费）。</summary>
+    public VmdIkState[][] IkStates = [];
+
+    public bool IsEmpty => Frames.Length == 0;
+
+    /// <summary>键数量。</summary>
+    public int KeyCount => Frames.Length;
+
+    /// <summary>
+    /// 阶梯采样（帧号的纯函数）：取最后一个 <c>Frames[i] &lt;= frame</c> 的可见性。
+    /// 早于首键 → true；晚于末键 → 保持末键状态；空轨道 → 恒 true。
+    /// </summary>
+    public bool SampleVisible(double frame)
+    {
+        int i = MmdBoneTrack.FindSegmentStart(Frames, frame);
+        return i < 0 || Visibles[i];
+    }
+}
+
+/// <summary>
 /// VMD 动效在运行时侧的展开形态：按骨/表情聚合好的轨道集合。
 ///
 /// 构建（<see cref="FromVmd"/>）与绑定（<see cref="Bind(SkeletalModel)"/>）分离：
@@ -255,11 +291,29 @@ public sealed class MmdAnimation
     public MmdBoneTrack[] BoneTracks = [];
     public MmdMorphTrack[] MorphTracks = [];
 
+    /// <summary>表示枠轨道（整模型可见性）。空轨道 ⇒ 恒可见。</summary>
+    public MmdPropertyTrack PropertyTrack = new();
+
     /// <summary>首键帧号（所有轨道取并），无轨道时为 0。</summary>
     public double StartFrame;
 
     /// <summary>末键帧号（所有轨道取并），无轨道时为 0。</summary>
     public double EndFrame;
+
+    /// <summary>
+    /// 表示枠阶梯采样（单动效便捷入口，实现见 <see cref="MmdPropertyTrack.SampleVisible"/>）。
+    /// 每帧的可见性由调用方写回 <see cref="SkeletalModel.Visible"/>。
+    /// </summary>
+    public bool SampleVisible(double frame) => PropertyTrack.SampleVisible(frame);
+
+    /// <summary>property 键数量（表示枠）。</summary>
+    public int PropertyKeyCount => PropertyTrack.KeyCount;
+
+    /// <summary>
+    /// <see cref="Sample"/>（单动效便捷入口）复用的采样缓冲，避免每帧分配。
+    /// <see cref="Sample"/> 本身就会直接改写模型，故本类不承诺线程安全 —— 与既有用法一致。
+    /// </summary>
+    private MmdPoseBuffer? _sampleScratch;
 
     /// <summary>
     /// 由 VMD 解析结果构建轨道集合（未绑定到任何模型）。
@@ -297,6 +351,10 @@ public sealed class MmdAnimation
             morphTracks[mi++] = BuildMorphTrack(name, keys);
         animation.MorphTracks = morphTracks;
 
+        animation.PropertyTrack = BuildPropertyTrack(vmd.PropertyKeys);
+
+        // 播放区间只由骨 / morph 轨道决定：property 是叠加在姿态上的布尔量，
+        // 不是姿态来源，因此它的键不应延长 / 缩短可播放的动效范围。
         double min = double.MaxValue, max = double.MinValue;
         foreach (var t in boneTracks)
             if (!t.IsEmpty) { min = System.Math.Min(min, t.Frames[0]); max = System.Math.Max(max, t.Frames[^1]); }
@@ -338,6 +396,8 @@ public sealed class MmdAnimation
             EndFrame = EndFrame,
             BoneTracks = bones.ToArray(),
             MorphTracks = morphs.ToArray(),
+            // 表示枠是整模型量，不做「该模型是否存在对应骨」的过滤，原样透传（数组共享）
+            PropertyTrack = PropertyTrack,
         };
     }
 
@@ -345,39 +405,37 @@ public sealed class MmdAnimation
     public static MmdAnimation Bind(VmdMotion vmd, SkeletalModel model) => FromVmd(vmd).Bind(model);
 
     /// <summary>
-    /// 把 <paramref name="frame"/> 处的姿态写入模型（骨骼）。
+    /// 把 <paramref name="frame"/> 处的姿态采样到 <paramref name="buffer"/>（先整体复位到绑定姿势）。
     ///
-    /// 纯函数语义：<b>先整体复位到绑定姿势</b>（局部旋转归单位、局部平移归 <see cref="SkeletalModel.LocalPositions"/>、
-    /// <see cref="SkeletalModel.MorphRawWeights"/> 归零），再逐轨道写入，不依赖也不保留上一帧的任何状态 ——
-    /// 因此「连续播放到帧 N」与「直接 seek 到帧 N」结果完全一致。
-    /// 只改局部 T/R 与原始 morph 权重，不重算世界矩阵（由调用方的 <c>PrepareFrame</c> 负责）；
-    /// Group 传播与骨 morph 由 <see cref="MmdMorphEvaluator.Evaluate"/> 在采样之后完成。
+    /// 纯函数语义：结果只取决于 <paramref name="frame"/>，不依赖也不保留上一帧 / 上一层的任何状态 ——
+    /// 因此「连续播放到帧 N」与「直接 seek 到帧 N」结果完全一致，且同一 buffer 可被所有层复用。
+    ///
+    /// 只写局部 T/R 与原始 morph 权重，不重算世界矩阵：
+    /// <c>Translations</c> 是<b>相对绑定姿势的父空间偏移</b>（0 = 绑定，写回时加 <c>LocalPositions</c>）；
+    /// 未覆盖项保持复位值，覆盖项记录在 <see cref="MmdPoseBuffer.CoveredBones"/> /
+    /// <see cref="MmdPoseBuffer.CoveredMorphs"/>。
     /// </summary>
-    public void Sample(SkeletalModel model, double frame)
+    public void SampleInto(double frame, MmdPoseBuffer buffer)
     {
-        var rotations = model.LocalRotations;
-        for (int i = 0; i < rotations.Length; i++)
-            rotations[i] = Quaternion.Identity;
+        buffer.Reset();
 
-        var translations = model.LocalTranslations;
-        var bindPositions = model.LocalPositions;
-        for (int i = 0; i < translations.Length; i++)
-            translations[i] = bindPositions[i];
-
-        var morphWeights = model.MorphRawWeights;
-        for (int i = 0; i < morphWeights.Length; i++)
-            morphWeights[i] = 0f;
+        var rotations = buffer.Rotations;
+        var translations = buffer.Translations;
+        var coveredBones = buffer.CoveredBones;
 
         foreach (var track in BoneTracks)
         {
             int index = track.BoneIndex;
-            if ((uint)index >= (uint)model.BoneCount) continue;
+            if ((uint)index >= (uint)rotations.Length) continue;
 
             track.Sample(frame, out var rotation, out var offset);
             rotations[index] = rotation;
-            // VMD 平移是相对绑定姿势的父空间偏移
-            translations[index] = bindPositions[index] + offset;
+            translations[index] = offset;       // VMD 平移是相对绑定姿势的父空间偏移
+            coveredBones.Add(index);
         }
+
+        var morphWeights = buffer.MorphWeights;
+        var coveredMorphs = buffer.CoveredMorphs;
 
         foreach (var track in MorphTracks)
         {
@@ -388,8 +446,42 @@ public sealed class MmdAnimation
                 int index = indices[k];
                 if ((uint)index >= (uint)morphWeights.Length) continue;
                 morphWeights[index] = weight;
+                coveredMorphs.Add(index);
             }
         }
+    }
+
+    /// <summary>
+    /// 单动效便捷入口：<see cref="SampleInto"/> + 写回模型（局部 T/R 与原始 morph 权重）。
+    ///
+    /// 纯函数语义（与拆分前逐位一致）：<b>先整体复位到绑定姿势</b>（局部旋转归单位、局部平移归
+    /// <see cref="SkeletalModel.LocalPositions"/>、<see cref="SkeletalModel.MorphRawWeights"/> 归零），
+    /// 再逐轨道写入，不依赖也不保留上一帧的任何状态。
+    /// 只改局部 T/R 与原始 morph 权重，不重算世界矩阵（由调用方的 <c>PrepareFrame</c> 负责）；
+    /// Group 传播与骨 morph 由 <see cref="MmdMorphEvaluator.Evaluate"/> 在采样之后完成。
+    ///
+    /// 多动效请直接用 <see cref="SampleInto"/> 喂混合器，不要经本入口。
+    /// </summary>
+    public void Sample(SkeletalModel model, double frame)
+    {
+        var buffer = _sampleScratch;
+        if (buffer is null || !buffer.Matches(model))
+            _sampleScratch = buffer = MmdPoseBuffer.ForModel(model);
+
+        SampleInto(frame, buffer);
+
+        var rotations = model.LocalRotations;
+        for (int i = 0; i < rotations.Length; i++)
+            rotations[i] = buffer.Rotations[i];
+
+        var translations = model.LocalTranslations;
+        var bindPositions = model.LocalPositions;
+        for (int i = 0; i < translations.Length; i++)
+            translations[i] = bindPositions[i] + buffer.Translations[i];
+
+        var morphWeights = model.MorphRawWeights;
+        for (int i = 0; i < morphWeights.Length; i++)
+            morphWeights[i] = buffer.MorphWeights[i];
     }
 
     /// <summary>
@@ -491,6 +583,40 @@ public sealed class MmdAnimation
             Name = name,
             Frames = frames,
             Weights = weights,
+        };
+    }
+
+    /// <summary>
+    /// 构建表示枠轨道：与骨骼 / morph 轨道同规则（按帧号稳定升序、同帧保留最后一次出现），
+    /// 但<b>不</b>按名字聚合、也<b>不</b>做模型绑定过滤 —— property 是整模型量。
+    /// </summary>
+    private static MmdPropertyTrack BuildPropertyTrack(List<VmdPropertyKey> keys)
+    {
+        var sorted = keys.OrderBy(k => k.Frame).ToArray();
+        int count = 0;
+        for (int i = 0; i < sorted.Length; i++)
+            if (i + 1 >= sorted.Length || sorted[i + 1].Frame != sorted[i].Frame)
+                count++;
+
+        var frames = new int[count];
+        var visibles = new bool[count];
+        var ikStates = new VmdIkState[count][];
+
+        int w = 0;
+        for (int i = 0; i < sorted.Length; i++)
+        {
+            if (i + 1 < sorted.Length && sorted[i + 1].Frame == sorted[i].Frame) continue;
+            frames[w] = sorted[i].Frame;
+            visibles[w] = sorted[i].Visible;
+            ikStates[w] = sorted[i].IkStates;
+            w++;
+        }
+
+        return new MmdPropertyTrack
+        {
+            Frames = frames,
+            Visibles = visibles,
+            IkStates = ikStates,
         };
     }
 }

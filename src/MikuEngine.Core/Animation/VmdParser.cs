@@ -21,7 +21,22 @@ public readonly record struct VmdBoneKey(
 /// <summary>一条表情（morph）关键帧。</summary>
 public readonly record struct VmdMorphKey(string MorphName, byte[] NameRaw, uint Frame, float Weight);
 
-/// <summary>VMD 解析结果：骨骼/表情关键帧原样数据 + 其余区段仅计数。</summary>
+/// <summary>
+/// 一条 property（表示枠）关键帧：整模型显示 / 非表示 + 附带的 IK 开关列表。
+///
+/// 可见性极性（与 babylon-mmd 解析层一致，已用 test.vmd 实测）：<c>byte != 0 ⇒ 可见</c>。
+/// 表示枠是<b>离散状态</b>：键与键之间保持、绝不插值（见 <see cref="MmdPropertyTrack.SampleVisible"/>）。
+/// </summary>
+public readonly record struct VmdPropertyKey(int Frame, bool Visible, VmdIkState[] IkStates);
+
+/// <summary>
+/// property 键附带的一条 IK 开关。本引擎无 IK ⇒ <b>解析保留、不消费</b>
+/// （见 docs/2026-09-11-anim-blend-plan.md §0.2），等 IK 立项后直接启用。
+/// <see cref="NameRaw"/> 与骨骼 / morph 键同一约定：原始字节是解码器无关的权威标识。
+/// </summary>
+public readonly record struct VmdIkState(string BoneName, byte[] NameRaw, bool Enabled);
+
+/// <summary>VMD 解析结果：骨骼 / 表情 / property（表示枠）关键帧原样数据 + 其余区段仅计数。</summary>
 public sealed class VmdMotion
 {
     public string ModelName = "";
@@ -32,11 +47,16 @@ public sealed class VmdMotion
     public List<VmdBoneKey> BoneKeys = [];
     public List<VmdMorphKey> MorphKeys = [];
 
-    // 以下区段解析但只记数（相机/光照/自阴影本方案不消费；属性帧的 IK 开关在 IK 立项前无用）
+    /// <summary>表示枠（显示 / 非表示）关键帧，文件顺序。IK 开关随键保留但本引擎不消费。</summary>
+    public List<VmdPropertyKey> PropertyKeys = [];
+
+    // 以下区段解析但只记数（相机 / 光照 / 自阴影本方案不消费）
     public int CameraKeyCount;
     public int LightKeyCount;
     public int SelfShadowKeyCount;
-    public int PropertyKeyCount;
+
+    /// <summary>property 键数量（= <see cref="PropertyKeys"/>.Count）。</summary>
+    public int PropertyKeyCount => PropertyKeys.Count;
 
     /// <summary>按 VMD 规范解析完所有区段后的剩余字节数（非 0 说明文件有非规范尾巴）。</summary>
     public int LeftoverBytes;
@@ -46,13 +66,22 @@ public sealed class VmdMotion
     public int BoneSectionBytes;
     public int MorphSectionOffset;
     public int MorphSectionBytes;
+
+    /// <summary>property 分区起点（= 键数据首字节，不含 count 字段）。无该区时为 0。</summary>
+    public int PropertySectionOffset;
+
+    /// <summary>property 分区字节数（含各键的 IK 开关列表；无该区时为 0）。</summary>
+    public int PropertySectionBytes;
 }
 
 /// <summary>
 /// VMD (Vocaloid Motion Data 0002) 解析器。
 ///
 /// 结构校验与字段偏移逐行对照 babylon-mmd 的 VmdData.CheckedCreate / BoneKeyFrame /
-/// MorphKeyFrame（esm/Loader/Parser/vmdObject.js），测试以它的解析结果为权威基准。
+/// MorphKeyFrame / PropertyKeyFrame（esm/Loader/Parser/vmdObject.js），测试以它的解析结果为权威基准。
+///
+/// property（表示枠）键在结构扫描阶段就地解码（对应 babylon PropertyKeyFrame 的 preparse），
+/// 骨骼 / morph 键则在扫描结束后拨回分区起点再解码（对应 babylon 的惰性读取）。
 ///
 /// 与 babylon 的两处已知差异（均不影响正确关键帧数据）：
 ///  1. Shift-JIS 非法字节：JS TextDecoder 输出 U+FFFD，.NET 932 输出 best-fit '?'——
@@ -131,18 +160,32 @@ public static class VmdParser
             offset += motion.SelfShadowKeyCount * SelfShadowKeyFrameBytes;
         }
 
-        // property 区帧长不定（含 IK 开关列表），必须逐帧跳
+        // property 区帧长不定（含 IK 开关列表），必须逐帧走
         if (data.Length - offset != 0)
         {
-            motion.PropertyKeyCount = checked((int)ReadU32(data, ref offset));
-            for (int i = 0; i < motion.PropertyKeyCount; i++)
+            int propertyKeyCount = checked((int)ReadU32(data, ref offset));
+            motion.PropertySectionOffset = offset;
+            motion.PropertyKeys.Capacity = propertyKeyCount;
+            for (int i = 0; i < propertyKeyCount; i++)
             {
                 RequireAvailable(data, offset, PropertyBaseBytes, "property 关键帧越界");
-                offset += PropertyBaseBytes;   // frameNumber(u32) + visible(u8)
+                int frame = checked((int)ReadU32(data, ref offset));
+                bool visible = data[offset++] != 0;
                 int ikStateCount = checked((int)ReadU32(data, ref offset));
                 RequireAvailable(data, offset, ikStateCount * IkStateBytes, "property IK 开关区越界");
-                offset += ikStateCount * IkStateBytes;
+
+                var ikStates = new VmdIkState[ikStateCount];
+                for (int k = 0; k < ikStateCount; k++)
+                {
+                    (var ikName, var ikNameRaw) = DecodeName(data, offset, 20);
+                    offset += 20;
+                    bool ikEnabled = data[offset++] != 0;
+                    ikStates[k] = new VmdIkState(ikName, ikNameRaw, ikEnabled);
+                }
+
+                motion.PropertyKeys.Add(new VmdPropertyKey(frame, visible, ikStates));
             }
+            motion.PropertySectionBytes = offset - motion.PropertySectionOffset;
         }
 
         motion.LeftoverBytes = data.Length - offset;
