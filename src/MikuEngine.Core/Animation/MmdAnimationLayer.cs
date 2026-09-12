@@ -3,10 +3,10 @@ namespace MikuEngine.Core.Animation;
 /// <summary>
 /// 时间轴上的一个动效层：把一条已绑定到模型的动效放到时间轴的任意位置，并可裁剪 / 加权 / 淡入淡出 / 循环。
 ///
-/// 坐标映射（见 docs/2026-09-11-anim-blend-plan.md 3.1）：
+/// 坐标映射：
 /// <code>
 /// local    = timeline − Offset
-/// 活跃区间 = [Offset + TrimStart, Offset + TrimEnd]        // 闭区间，与 babylon isInSpan 一致
+/// 活跃区间 = [Offset + TrimStart, Offset + TrimEnd]        // 闭区间，与 babylon-mmd isInSpan 一致
 /// </code>
 ///
 /// <see cref="Offset"/> = 「动画帧 0 落在时间轴哪一帧」：在第 30 帧导入 ⇒ <c>Offset = 30</c>。
@@ -67,7 +67,7 @@ public sealed class MmdAnimationLayer
     /// <summary>
     /// 该层在时间轴帧 <paramref name="timelineFrame"/> 是否贡献。
     ///
-    /// 规则（方案 3.2 / 3.3）：
+    /// 规则：
     /// <list type="bullet">
     ///   <item>活跃区间<b>之前</b>一律不贡献 —— 空白保留，即使 <see cref="Loop"/> 也尚未开始；</item>
     ///   <item>活跃区间<b>之内</b>贡献；</item>
@@ -106,7 +106,7 @@ public sealed class MmdAnimationLayer
     /// <summary>
     /// 层内淡入淡出包络 ∈ [0, 1]；默认（<see cref="FadeIn"/> = <see cref="FadeOut"/> = 0）恒为 1。
     ///
-    /// 当前是线性斜坡；日后若要换 babylon 的 <c>easingFunction</c>，只改这里、接口不变。
+    /// 当前是线性斜坡；日后若要换类似 babylon-mmd 的 <c>easingFunction</c>，只改这里、接口不变。
     /// 混合器按 §3.4 的 <c>wᵢ_eff = wᵢ · norm · fadeᵢ(timeline)</c> 消费本值。
     /// </summary>
     public float FadeAt(double timelineFrame)

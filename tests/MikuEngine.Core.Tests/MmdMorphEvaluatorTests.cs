@@ -181,7 +181,7 @@ public class MmdMorphEvaluatorTests
     [Fact]
     public void Group_CascadesThroughNestedGroups()
     {
-        // 组套组：组0 →(0.5) 组1 →(1.0) 空组。reze 只做单层、babylon 直接跳过，本方案级联。
+        // 组套组：组0 →(0.5) 组1 →(1.0) 空组。reze 只做单层、babylon-mmd 直接跳过，本方案级联。
         var model = Build(new[]
         {
             GroupMorph("组0", [1], [0.5f]),
@@ -353,6 +353,62 @@ public class MmdMorphEvaluatorTests
 
     // ================================================================ 材质 morph
 
+    /// <summary>
+    /// 方案 §7.1-17：材质 morph 不单独混合 —— 混合器写 <see cref="SkeletalModel.MorphRawWeights"/>，
+    /// <see cref="MmdMorphEvaluator"/> 传播到有效权重后 <see cref="MmdMorphEvaluator.ResolveMaterial"/>
+    /// 必须自动跟随<b>混合后</b>的权重（层间竞争归一 0.5×1 + 0.5×0.4 = 0.7）。
+    /// </summary>
+    [Fact]
+    public void MaterialMorph_FollowsBlendedMorphWeights()
+    {
+        var model = Build(
+            new[]
+            {
+                MaterialMorph("乘算", [
+                    new PmxMaterialMorphElement
+                    {
+                        MaterialIndex = 0,
+                        Type = PmxMaterialMorphType.Multiply,
+                        Diffuse = new Vector4(0.5f, 1f, 1f, 1f),
+                        Specular = Vector3.One,
+                        Shininess = 1f,
+                        Ambient = Vector3.One,
+                        EdgeColor = new Vector4(1f, 1f, 1f, 1f),
+                        EdgeSize = 0f,
+                        TextureColor = Vector4.One,
+                        SphereTextureColor = Vector4.One,
+                        ToonTextureColor = Vector4.One,
+                    },
+                ]),
+            },
+            materials: [Material("脸"), Material("体")]);
+
+        VmdMorphKey Key(string name, uint frame, float weight)
+            => new(name, System.Text.Encoding.UTF8.GetBytes(name), frame, weight);
+
+        var motionA = new VmdMotion();
+        motionA.MorphKeys.Add(Key("乘算", 0, 1f));
+        var motionB = new VmdMotion();
+        motionB.MorphKeys.Add(Key("乘算", 0, 0.4f));
+
+        var mixer = new MmdAnimationMixer();
+        mixer.AddLayer(new MmdAnimationLayer(MmdAnimation.Bind(motionA, model)) { Weight = 1f });
+        mixer.AddLayer(new MmdAnimationLayer(MmdAnimation.Bind(motionB, model)) { Weight = 1f });
+
+        mixer.Evaluate(model, 0);
+        Assert.Equal(0.7f, model.MorphRawWeights[0], 4f);   // 逐项竞争归一（5d-3 偏离）
+
+        MmdMorphEvaluator.Evaluate(model);
+        Assert.Equal(0.7f, model.MorphWeights[0], 4f);      // 无 Group ⇒ 有效值 = 原始值
+
+        // Multiply：v + (v·m − v)·w，w = 0.7 ⇒ Diffuse.R: 1 + (0.5−1)×0.7 = 0.65；EdgeSize: 1 − 0.7 = 0.3
+        var face = MmdMorphEvaluator.ResolveMaterial(model, 0);
+        Assert.Equal(1f + (0.5f - 1f) * 0.7f, face.Diffuse.X, 4f);
+        Assert.Equal(1f - 0.7f, face.EdgeSize, 4f);
+        var body = MmdMorphEvaluator.ResolveMaterial(model, 1);
+        Assert.Equal(1f, body.Diffuse.X);                   // 只作用于材质 0
+    }
+
     [Fact]
     public void ResolveMaterial_Multiply()
     {
@@ -393,8 +449,7 @@ public class MmdMorphEvaluatorTests
 
     [Fact]
     public void ResolveMaterial_Add_MinusOneAffectsAllMaterials()
-    {
-        var model = Build(
+    {        var model = Build(
             new[]
             {
                 MaterialMorph("加算", [

@@ -57,7 +57,7 @@ class Deserializer {
     for (let i = 0; i < n; i++) { out.push(this.view.getFloat32(this.offset, true)); this.offset += 4; }
     return out;
   }
-  // trim=true：在第一个 0x00 字节处截断（babylon getDecoderString 语义）
+  // trim=true：在第一个 0x00 字节处截断（babylon-mmd getDecoderString 语义）
   getDecoderString(len, trim) {
     let bytes = this.u8.subarray(this.offset, this.offset + len);
     this.offset += len;
@@ -85,7 +85,7 @@ const ds = new Deserializer(ab);
 if (ds.bytesAvailable < SIGNATURE_BYTES + MODEL_NAME_BYTES) throw new Error("文件过短");
 const signature = new TextDecoder("utf-8").decode(ab.slice(0, SIGNATURE_BYTES));
 if (!signature.startsWith(SIGNATURE)) throw new Error("签名不符: " + JSON.stringify(signature));
-// 模型名区 = 30..50（babylon CheckedCreate 是跳过；这里读出来留作 golden 基准）
+// 模型名区 = 30..50（babylon-mmd CheckedCreate 是跳过；这里读出来留作 golden 基准）
 ds.offset = SIGNATURE_BYTES;
 const modelName = ds.getDecoderString(MODEL_NAME_BYTES, true);
 
@@ -131,7 +131,7 @@ if (ds.bytesAvailable !== 0) {
   for (let i = 0; i < propertyKeyFrameCount; ++i) {
     if (ds.bytesAvailable < PROPERTY_BASE_BYTES) throw new Error("property 帧越界");
     const frameNumber = ds.getUint32();
-    const visible = ds.getUint8() !== 0;          // babylon：byte != 0 ⇒ 可见
+    const visible = ds.getUint8() !== 0;          // babylon-mmd：byte != 0 ⇒ 可见
     if (ds.bytesAvailable < 4) throw new Error("缺 ikStateCount");
     const ikStateCount = ds.getUint32();
     if (ds.bytesAvailable < ikStateCount * IK_STATE_BYTES) throw new Error("ikState 区越界");
@@ -175,7 +175,7 @@ function hashU32(h, v) {
 function hashF32(h, v) { return hashU32(h, f32bits(v)); }
 
 const boneKeys = [];
-ds.offset = boneOffset; // 校验阶段已顺序扫过全文件，读取阶段回到分区起点（babylon 用显式 _startOffset，等价）
+ds.offset = boneOffset; // 校验阶段已顺序扫过全文件，读取阶段回到分区起点（babylon-mmd 用显式 _startOffset，等价）
 for (let i = 0; i < boneKeyFrameCount; i++) {
   const raw = ds.u8.subarray(ds.offset, ds.offset + 15);
   const nameRaw = trimName(raw);

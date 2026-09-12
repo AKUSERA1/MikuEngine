@@ -4,23 +4,22 @@ using MikuEngine.Core.Models;
 namespace MikuEngine.Core.Animation;
 
 /// <summary>
-/// 多动效混合器（docs/2026-09-11-anim-blend-plan.md 3.3 / 3.4 / 3.6）。
+/// 多动画混合器。
 ///
 /// 每帧对时间轴帧号做一次 <see cref="Evaluate"/>：
 /// <list type="number">
 ///   <item>收集活跃层（<see cref="MmdAnimationLayer.IsActive"/>：Weight &gt; 0 且落在活跃区间内）；</item>
 ///   <item>逐层 <see cref="MmdAnimation.SampleInto"/> 到<b>共享 scratch</b>（所有层复用同一实例）；</item>
-///   <item>按 3.4 公式累加：逐项「覆盖权重和」归一 + 残差混回绑定姿势；</item>
+///   <item>逐项「覆盖权重和」归一 + 残差混回绑定姿势；</item>
 ///   <item>可见性：逐活跃层取阶梯布尔，AND 合并写回 <see cref="SkeletalModel.Visible"/>；</item>
 ///   <item>整体写回局部 T/R 与原始 morph 权重（含未覆盖项）⇒ 帧号纯函数、幂等、seek 等价连续播放。</item>
 /// </list>
 ///
-/// 与参考实现的取舍（方案 2.4 选择表）：旋转用 reze 的半球对齐 nlerp（顺序无关）；
+/// 与参考实现的取舍：旋转用 reze 的半球对齐 nlerp（顺序无关）；
 /// 残差按<b>覆盖该项的权重和</b>混回绑定（不是全局权重）；可见性<b>不</b>做数值加权
-/// （规避 babylon 的 0.5 半透明 bug），布尔 AND。IK 开关解析保留、不消费。
+/// （规避 babylon-mmd 的 0.5 半透明 bug），布尔 AND。
 ///
-/// 与方案 3.4 的一处偏离（已在 5d-3 实施记录中说明理由）：权重归一不用「所有活跃层权重和」的
-/// <c>norm = 1/Σw</c> 全局因子，改为<b>逐项</b>归一 —— 仅当同一骨 / morph 上的覆盖权重和 W(item) &gt; 1
+/// 权重归一用<b>逐项</b>归一 —— 仅当同一骨 / morph 上的覆盖权重和 W(item) &gt; 1
 /// 时才除以 W(item)。层间竞争（多个层驱动同一项）时与 babylon / reze 的全局归一严格等价
 /// （那正是两家的设计场景：同一条动画的重叠 span）；而 MMD 的「モーション槽 + 表情槽」各层
 /// 轨道互不重叠，全局归一会把四层各压到 1/4 强度 —— 与 MMD 的并集行为相悖。
@@ -114,7 +113,7 @@ public sealed class MmdAnimationMixer
         Array.Fill(boneN, 0);
         Array.Fill(morphW, 0f);
 
-        // ── 2-3. 逐层采样 + 累加 ─────────────────────────────────────────
+        // ── 逐层采样 + 累加 ─────────────────────────────────────────
         var scratch = _scratch!;
         bool visible = true;
         int activeCount = 0;
@@ -160,16 +159,16 @@ public sealed class MmdAnimationMixer
                 morphW[mo] += wEff;
             }
 
-            // ── 4. 可见性 AND（3.6）：布尔量不进数值混合，权重 0.5 的隐藏层照样一票否决 ──
+            // ── 可见性 AND：布尔量不进数值混合，权重 0.5 的隐藏层照样一票否决 ──
             visible &= layer.IsVisibleAt(local);
         }
 
         Visible = activeCount > 0 ? visible : true;
 
-        // ── 4b. 可见性写回（3.6：Visible == false ⇒ 渲染三 pass 早退）────────
+        // ── 可见性写回（Visible == false ⇒ 渲染三 pass 早退）────────
         model.Visible = Visible;
 
-        // ── 5. 写回（整体写、含未覆盖项 ⇒ 幂等）───────────────────────────
+        // ── 写回（整体写、含未覆盖项 ⇒ 幂等）───────────────────────────
         var modelRotations = model.LocalRotations;
         var modelTranslations = model.LocalTranslations;
         var bindPositions = model.LocalPositions;

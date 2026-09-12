@@ -9,8 +9,7 @@ namespace MikuEngine.Core.Animation;
 ///
 /// 职责边界：
 ///   * 本类<b>无 GL 依赖</b>，纯 Core，可单元测试；
-///   * 顶点 / UV / 材质 morph 只解算权重，几何与材质的落地由渲染层消费（见
-///     docs/2026-09-11-anim-morph-plan.md §5）；
+///   * 顶点 / UV / 材质 morph 只解算权重，几何与材质的落地由渲染层消费；
 ///   * <b>不</b>支持 Flip(9) / Impulse(10) / 附加 UV1~4(4~7)：转换器不为它们建表，
 ///     所以这里天然跳过（`MorphKinds` 仍保留原类型值，便于诊断与断言）。
 ///

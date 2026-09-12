@@ -54,7 +54,7 @@ public class MmdAnimationTests
     private const byte LinearA = 20;    // MMD 默认线性控制点：(20,20) 与 (107,107)
     private const byte LinearB = 107;
 
-    /// <summary>构造 64B 原始插值块（写在各通道自身副本 c*16 上，等价 babylon 分读源）。</summary>
+    /// <summary>构造 64B 原始插值块（写在各通道自身副本 c*16 上，等价 babylon-mmd 分读源）。</summary>
     private static byte[] RawInterp(
         (byte X1, byte X2, byte Y1, byte Y2) x,
         (byte X1, byte X2, byte Y1, byte Y2) y,

@@ -3,9 +3,9 @@ using MikuEngine.Core.Models;
 namespace MikuEngine.Core.Animation;
 
 /// <summary>
-/// 多层时间轴（Step 5d-4）：<see cref="MmdAnimationMixer"/> 的播放控制外壳。
+/// 多层时间轴：<see cref="MmdAnimationMixer"/> 的播放控制外壳。
 ///
-/// 职责划分（docs/2026-09-11-anim-blend-plan.md 3.1 / 5）：
+/// 职责划分：
 /// <list type="bullet">
 ///   <item>混合（采样 / 加权 / 可见性 AND）—— <see cref="MmdAnimationMixer"/>，本类不碰；</item>
 ///   <item>层集合管理 —— <see cref="AddLayer"/>（可指定「在第 N 帧导入」）/ <see cref="RemoveLayer"/> /

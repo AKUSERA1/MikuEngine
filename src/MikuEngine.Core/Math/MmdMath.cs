@@ -41,7 +41,7 @@ public static class MmdMath
         float cosYcosX = 1f - 2f * (q.X * q.X + q.Y * q.Y);
         euler.Y = MathF.Atan2(sinYcosX, cosYcosX);
 
-        // Z（roll）= atan2(m12, m22) = atan2(2(wx + yz), 1 - 2(x² + y²)) 不对...
+        // Z（roll）= atan2(m12, m22) = atan2(2(wx + yz), 1 - 2(x² + y²)) 不对
         // 正确公式：atan2(2(wz + xy), 1 - 2(x² + z²))
         float sinZcosX = 2f * (q.W * q.Z + q.X * q.Y);
         float cosZcosX = 1f - 2f * (q.X * q.X + q.Z * q.Z);

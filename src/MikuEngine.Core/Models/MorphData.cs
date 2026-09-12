@@ -42,8 +42,7 @@ public struct BoneMorphSparse
 
 /// <summary>
 /// Group（组）morph 的引用表。求值序见 <see cref="SkeletalModel.GroupOrder"/>。
-/// 注意：Flip（PMX 2.1 类型 9）与 Group 文件布局相同，但语义不同，本步<b>不支持</b>，
-/// 因此不会出现在本表中（见 docs/2026-09-11-anim-morph-plan.md §0.2）。
+/// 注意：Flip（PMX 2.1 类型 9）与 Group 文件布局相同，但语义不同，本步<b>不支持</b>，因此不会出现在本表中。
 /// </summary>
 public struct GroupMorphSparse
 {

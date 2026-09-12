@@ -6,7 +6,7 @@ public enum MmdPlaybackMode
     /// <summary>动画锁定真实时间：<c>CurrentFrame += dt * PlaybackFps</c>（默认）。</summary>
     RealTime = 0,
 
-    /// <summary>每渲染帧精确推进 1 动画帧（调试 / 逐帧导出）。</summary>
+    /// <summary>每渲染帧精确推进 1 动画帧（离线渲染 / 调试 / 帧导出）。</summary>
     FrameLocked = 1,
 }
 

@@ -504,7 +504,7 @@ public sealed class MmdAnimation
 
     private static MmdBoneTrack BuildBoneTrack(string name, List<VmdBoneKey> keys)
     {
-        // OrderBy 为稳定排序：同帧键保持文件顺序 → 后续保留"最后一次出现"与 babylon 一致。
+        // OrderBy 为稳定排序：同帧键保持文件顺序 → 后续保留"最后一次出现"与 babylon-mmd 一致。
         var sorted = keys.OrderBy(k => k.Frame).ToArray();
         int count = 0;
         for (int i = 0; i < sorted.Length; i++)

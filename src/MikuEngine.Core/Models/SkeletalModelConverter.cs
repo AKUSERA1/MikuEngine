@@ -343,14 +343,13 @@ public static class SkeletalModelConverter
 
     /// <summary>
     /// 建表情数据表。**全程稀疏**：只重排 PMX 的「受影响索引 + 偏移」，绝不展开成
-    /// 「顶点数 × morph 数」的稠密数组（babylon-mmd 的做法，20 万顶点 / 400 morph ≈ 960 MB）。
+    /// 「顶点数 × morph 数」的稠密数组（babylon-mmd 的做法，最坏情况下 20 万顶点 x 200 morph ≈ 480 MB）。
     ///
     /// 支持：Group(0) / Vertex(1) / Bone(2) / UV(3) / Material(8)。
     ///
     /// <b>不支持</b>（数据仍留在 <see cref="PmxMorph"/> 里，这里不建运行时表、不参与求值）：
-    ///   * Flip(9) / Impulse(10) —— PMX 2.1 追加项，实际模型里几乎不存在；Impulse 还需刚体物理。
+    ///   * Flip(9) / Impulse(10) —— PMX 2.1 追加项，实际模型里几乎不存在，不做相关实现。
     ///   * 附加 UV1~4(4~7) —— 本引擎顶点格式没有附加 UV 通道。
-    /// 详见 docs/2026-09-11-anim-morph-plan.md §0.2。
     /// </summary>
     private static void BuildMorphs(PmxModel pmx, SkeletalModel model)
     {
@@ -414,7 +413,7 @@ public static class SkeletalModelConverter
                         if ((uint)v >= (uint)model.VertexCount || s + 3 >= uOff.Length) continue;
                         indices.Add(v);
                         // 只用 xy。本引擎上传的是文件原序 UV 且采样已与 PmxEditor 对齐，
-                        // 因此不做 V 翻转，偏移直接相加（见 anim-morph-plan §5.2）。
+                        // 因此不做 V 翻转，偏移直接相加。
                         offsets.Add(new Vector2(uOff[s], uOff[s + 1]));
                     }
                     if (indices.Count > 0)

@@ -12,7 +12,7 @@ namespace MikuEngine.Core.Tests;
 /// 1. 单层 <c>Weight=1, Offset=0</c> ⇒ 与单动效 <see cref="MmdAnimation.Sample"/> <b>位级一致</b>（回归基线）；
 /// 2. 残差按「覆盖该项的权重和」混回绑定姿势（不是全局权重）；
 /// 3. 未覆盖项 = 绑定姿势 / 0（每帧整体写回，无残留）；
-/// 4. 可见性 = 活跃层阶梯布尔 AND，<b>不</b>被权重缩放（babylon 的 0.5 半透明反例）；
+/// 4. 可见性 = 活跃层阶梯布尔 AND，<b>不</b>被权重缩放（babylon-mmd 的 0.5 半透明反例）；
 /// 5. 帧号纯函数：幂等、seek ≡ 连续播放。
 /// </summary>
 public class MmdAnimationMixerTests
@@ -375,7 +375,7 @@ public class MmdAnimationMixerTests
     [Fact]
     public void Blend_Visibility_NotScaledByWeight_BabylonHalfCase()
     {
-        // 钉死 babylon 的 0.5 反例：可见层 0.5 + 隐藏层 0.5 ⇒ 必须完全不可见，不是 50% 透明
+        // 钉死 babylon-mmd 的 0.5 反例：可见层 0.5 + 隐藏层 0.5 ⇒ 必须完全不可见，不是 50% 透明
         var (visible, hidden) = MakeVisibilityPair();
 
         var mixer = new MmdAnimationMixer();

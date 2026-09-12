@@ -7,7 +7,7 @@ namespace MikuEngine.Core.Animation;
 /// <summary>VMD 解析失败（签名不符 / 区段越界 / 文件截断）。</summary>
 public sealed class VmdParseException(string message) : Exception(message);
 
-/// <summary>一条骨骼关键帧（VMD 原始数据，帧号不保证有序——排序在 Step 2 轨道构建时做）。</summary>
+/// <summary>一条骨骼关键帧（VMD 原始数据，帧号不保证有序）。</summary>
 public readonly record struct VmdBoneKey(
     string BoneName,
     /// <summary>名字原始字节（截断到首个 0x00）——解码器无关的权威标识，供跨模型绑定兜底。</summary>
@@ -24,13 +24,13 @@ public readonly record struct VmdMorphKey(string MorphName, byte[] NameRaw, uint
 /// <summary>
 /// 一条 property（表示枠）关键帧：整模型显示 / 非表示 + 附带的 IK 开关列表。
 ///
-/// 可见性极性（与 babylon-mmd 解析层一致，已用 test.vmd 实测）：<c>byte != 0 ⇒ 可见</c>。
+/// 可见性极性：<c>byte != 0 ⇒ 可见</c>。
 /// 表示枠是<b>离散状态</b>：键与键之间保持、绝不插值（见 <see cref="MmdPropertyTrack.SampleVisible"/>）。
 /// </summary>
 public readonly record struct VmdPropertyKey(int Frame, bool Visible, VmdIkState[] IkStates);
 
 /// <summary>
-/// property 键附带的一条 IK 开关。本引擎无 IK ⇒ <b>解析保留、不消费</b>
+/// property 键附带的一条 IK 开关。本引擎当前暂无 IK ⇒ <b>解析保留、不消费</b>
 /// （见 docs/2026-09-11-anim-blend-plan.md §0.2），等 IK 立项后直接启用。
 /// <see cref="NameRaw"/> 与骨骼 / morph 键同一约定：原始字节是解码器无关的权威标识。
 /// </summary>
@@ -40,7 +40,9 @@ public readonly record struct VmdIkState(string BoneName, byte[] NameRaw, bool E
 public sealed class VmdMotion
 {
     public string ModelName = "";
-    /// <summary>模型名原始字节（20B 字段截断到首个 0x00）。</summary>
+    /// <summary>模型名原始字节（20B 字段截断到首个 0x00）。
+    /// 注意：Windows的ANSI可能导致部分作者制作VMD时，模型名称以 GBK 等编码写入，而VMD以Shitf-JIS为准，导致模型名出现乱码。
+    /// </summary>
     public byte[] ModelNameRaw = [];
 
     /// <summary>文件顺序（与 babylon-mmd VmdObject 遍历顺序一致）。</summary>
@@ -50,7 +52,7 @@ public sealed class VmdMotion
     /// <summary>表示枠（显示 / 非表示）关键帧，文件顺序。IK 开关随键保留但本引擎不消费。</summary>
     public List<VmdPropertyKey> PropertyKeys = [];
 
-    // 以下区段解析但只记数（相机 / 光照 / 自阴影本方案不消费）
+    // 以下区段解析但只记数（相机 / 光照 / 自阴影暂不消费）
     public int CameraKeyCount;
     public int LightKeyCount;
     public int SelfShadowKeyCount;
@@ -190,7 +192,7 @@ public static class VmdParser
 
         motion.LeftoverBytes = data.Length - offset;
 
-        // —— 内容解码（文件顺序；与 babylon BoneKeyFrames/MorphKeyFrames 惰性读取一致）——
+        // —— 内容解码（文件顺序；与 babylon-mmd BoneKeyFrames/MorphKeyFrames 惰性读取一致）——
         // 注意：上面的结构校验是顺序扫描，offset 已走到文件尾；这里必须拨回分区起点再逐键解码。
         offset = motion.BoneSectionOffset;
         motion.BoneKeys.Capacity = (int)boneCount;
@@ -239,7 +241,7 @@ public static class VmdParser
         return v;
     }
 
-    /// <summary>Shift-JIS 定长名：在第一个 0x00 处截断再解码（babylon getDecoderString trim=true 语义）。
+    /// <summary>Shift-JIS 定长名：在第一个 0x00 处截断再解码（babylon-mmd getDecoderString trim=true 语义）。
     /// 同时返回原始字节——解码字符串随解码器（WHATWG vs .NET 932）对非标准字节映射不同，原始字节才是权威标识。</summary>
     private static (string Name, byte[] Raw) DecodeName(byte[] d, int offset, int length)
     {

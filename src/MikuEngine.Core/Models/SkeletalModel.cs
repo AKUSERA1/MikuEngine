@@ -74,7 +74,7 @@ public sealed class SkeletalModel
     /// 整模型可见性（VMD 表示枠的求值结果），默认 true。
     ///
     /// false ⇒ 渲染层跳过<b>主渲染 + 轮廓线 + 自阴影 caster</b> 三个 pass
-    /// （与 reze-engine <c>Model.setVisible</c> 的语义一致）；拾取不受影响，本引擎无物理故不涉及。
+    /// （与 reze-engine <c>Model.setVisible</c> 的语义一致）；拾取不受影响。
     /// 由动画层每帧写入（单动效 <c>MmdAnimation.SampleVisible</c>，
     /// 多动效为各活跃层按 AND 合并）；静态预览恒为 true。
     /// </summary>
@@ -103,7 +103,7 @@ public sealed class SkeletalModel
     //
     // 数据布局原则：**全程稀疏**。PMX 的顶点/UV/骨 morph 源数据本身就是
     // 「受影响索引 + 偏移」的稀疏形式，这里只做重排与越界过滤，绝不展开成
-    // 「顶点数 × morph 数」的稠密数组（babylon-mmd 的做法，20 万顶点 / 400 morph ≈ 960 MB）。
+    // 「顶点数 × morph 数」的稠密数组（babylon-mmd 的做法，极端情况下 20 万顶点 x 200 morph ≈ 480 MB）。
     //
     // 运行时唯一每帧变化的 morph 状态是 MorphWeights；顶点/UV 偏移由渲染层按活跃
     // morph 稀疏累加，材质 morph 由 MmdMorphEvaluator.ResolveMaterial 逐段混合。
@@ -168,7 +168,7 @@ public sealed class SkeletalModel
     // ── 付与（append transform）与軸制限 ────────────────────────────────
     //
     // 付与是 MMD 的「父约束」：目标骨在自身动画之外，额外继承源骨的一部分变换。
-    // 本模型的典型用法：
+    // 测试模型的典型用法：
     //   * 足D/ひざD/足首D（每腿 624 个顶点）付与自 足/ひざ/足首  —— 复制腿，让它不随腰弯曲
     //   * 腰キャンセル左/右 付与自 腰（ratio = -1）—— 抵消腰的旋转
     //   * 左目/左目先 付与自 両目/左目（ratio 0.8 / -0.7）—— 眼球跟随
