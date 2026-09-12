@@ -24,6 +24,7 @@ using MikuEngine.Engine;
 //   动画（Mixer 多动效，Motion/ 下存在对应 VMD 时自动加载）：
 //     Motion.vmd=骨动效 | Lips.vmd=口型 | Eyes.vmd=视线（両目）| Facial.vmd=表情
 //   空格 ：暂停/播放 | ←/→ ：∓1 帧 | ↑/↓ ：帧率 ±6 | F ：回首帧 | V ：动画驱动开关
+//   [    ：把 test1.vmd 导入当前帧（任意帧导入演示） | ] ：移除导入层 | ; ：导入层权重循环 | ' ：层列表
 //
 // --smoke     ：无人值守自检。隐藏窗口跑 40 帧 → 强制开影模式 1 → 打印中间 RT 统计 → 退出。
 //               （跳过动画加载：自阴影/轮廓线这类多 pass 功能的"静默失效"没法靠肉眼看画面定位，
@@ -76,12 +77,17 @@ var input = new OrbitInputController(camera, enabled: true);
 int testBoneIndex = -1;
 bool poseApplied = false;
 
-// VMD 动画（里程碑 A → Step 5d-3 Mixer）：Motion/ 下的骨动效 + 三个表情槽位动效自动加载
-MmdAnimationMixer? mixer = null;
-MmdAnimationPlayer? animPlayer = null;
+// VMD 动画（Step 5d-4 MmdTimeline）：Motion/ 下的骨动效 + 三个表情槽位动效自动加载；
+// [ 把另一条 VMD 导入当前帧 / ] 移除 / ; 循环权重 / ' 打印层列表
+MmdTimeline? timeline = null;
+var baseLayers = new List<(string Desc, string File, MmdAnimationLayer Layer)>();
+MmdAnimationLayer? importedLayer = null;   // [ 键导入的层（演示任意帧导入与清除）
+string importedFile = "";
+float importedWeight = 1f;                 // ; 键循环 1 → 0.5 → 0
 bool animationEnabled = true;
 bool morphEnabled = true;      // M 键切换：关时把表情权重全清零（回归基线用）
 bool morphDiagPrinted = false; // 首次有表情真正生效时打一条诊断
+long applyTicksTotal = 0; int applyCount = 0; long applyTicksMax = 0;   // --anim-smoke 耗时统计
 
 window.Load += () =>
 {
@@ -151,7 +157,7 @@ window.Load += () =>
     if (testBoneIndex < 0)
         Console.WriteLine("[Demo] 未找到常用骨骼名，按 B 将旋转 #0 骨骼");
 
-    // ── VMD 动画（Step 5d-3：Mixer 多动效）─────────────────────────────
+    // ── VMD 动画（Step 5d-4：MmdTimeline 多层时间轴）───────────────────
     // 帧号驱动：渲染帧只推进游标，采样是帧号的纯函数 —— 跳帧 / seek / 暂停都不动采样逻辑。
     // smoke 模式跳过（自阴影 A/B 校验和比较的是相邻帧画面，动画会让模型动起来污染差异统计）；
     // --anim-smoke 反其道行之：专门为「多层播放无异常」的无人值守验收而设。
@@ -161,10 +167,10 @@ window.Load += () =>
     }
     else
     {
-        mixer = new MmdAnimationMixer();
+        timeline = new MmdTimeline { Loop = true };     // 舞曲播完回卷
 
         // (文件名, 层说明)。Motion 是骨动效主体；Lips/Eyes/Facial 对应 MMD 的「表情」槽位。
-        // 四层的帧区间天然重合（≈0..833），无需 Loop；全 Offset=0 同步播放。
+        // 四层的帧区间天然重合（≈0..833），全 Offset=0 同步播放。
         var motionFiles = new (string File, string Desc)[]
         {
             ("Motion.vmd", "骨动效"),
@@ -188,7 +194,8 @@ window.Load += () =>
                 var vmd = VmdParser.Parse(File.ReadAllBytes(motionPath));
                 var expanded = MmdAnimation.FromVmd(vmd);
                 var bound = expanded.Bind(m);
-                var layer = mixer.AddLayer(new MmdAnimationLayer(bound));
+                var layer = timeline.AddLayer(new MmdAnimationLayer(bound));
+                baseLayers.Add((desc, file, layer));
                 loadedLayers++;
 
                 string slots = bound.BoneTracks.Length > 0 && bound.MorphTracks.Length > 0
@@ -210,15 +217,14 @@ window.Load += () =>
         if (loadedLayers == 0)
         {
             Console.WriteLine("[Demo] 没有任何可用的 VMD 层，动画不可用");
-            mixer = null;
+            timeline = null;
+            baseLayers.Clear();
         }
         else
         {
-            var (rangeStart, rangeEnd) = mixer.ActiveRange;
-            animPlayer = new MmdAnimationPlayer();
-            animPlayer.Configure(rangeStart, rangeEnd);
-            Console.WriteLine($"[Demo] Mixer：{loadedLayers} 层 | 时间轴 {rangeStart:F0}..{rangeEnd:F0}（各层活跃区间并集）" +
-                              $" | 空格暂停 ←/→单步 ↑/↓帧率");
+            Console.WriteLine($"[Demo] 时间轴：{loadedLayers} 层 | 区间 {timeline.StartFrame:F0}..{timeline.EndFrame:F0}（各层活跃区间并集）" +
+                              " | 空格暂停 ←/→单步 ↑/↓帧率");
+            Console.WriteLine("[Demo] 层管理：[=把 test1.vmd 导入当前帧 | ]=移除导入层 | ;=导入层权重 1/0.5/0 | '=层列表");
         }
     }
 
@@ -286,25 +292,96 @@ window.Load += () =>
                 target.Model.ResetPose();
                 Console.WriteLine("[Demo] 姿势已重置为绑定姿势");
             }
-            else if (animPlayer != null && key == Keys.Space)
+            else if (timeline != null && key == Keys.Space)
             {
-                animPlayer.Paused = !animPlayer.Paused;
-                Console.WriteLine($"[Demo] 动画：{(animPlayer.Paused ? "暂停" : "播放")}（帧 {animPlayer.CurrentFrame:F1}）");
+                timeline.Paused = !timeline.Paused;
+                Console.WriteLine($"[Demo] 时间轴：{(timeline.Paused ? "暂停" : "播放")}（帧 {timeline.CurrentFrame:F1}）");
             }
-            else if (animPlayer != null && (key == Keys.Left || key == Keys.Right))
+            else if (timeline != null && (key == Keys.Left || key == Keys.Right))
             {
-                animPlayer.Step(key == Keys.Left ? -1 : 1);
-                Console.WriteLine($"[Demo] 动画帧：{animPlayer.CurrentFrame:F1}");
+                timeline.Step(key == Keys.Left ? -1 : 1);
+                Console.WriteLine($"[Demo] 时间轴帧：{timeline.CurrentFrame:F1}");
             }
-            else if (animPlayer != null && (key == Keys.Up || key == Keys.Down))
+            else if (timeline != null && (key == Keys.Up || key == Keys.Down))
             {
-                animPlayer.PlaybackFps = MathF.Max(1f, animPlayer.PlaybackFps + (key == Keys.Up ? 6f : -6f));
-                Console.WriteLine($"[Demo] 动画帧率：{animPlayer.PlaybackFps:F0} fps");
+                timeline.PlaybackFps = MathF.Max(1f, timeline.PlaybackFps + (key == Keys.Up ? 6f : -6f));
+                Console.WriteLine($"[Demo] 时间轴帧率：{timeline.PlaybackFps:F0} fps");
             }
-            else if (animPlayer != null && key == Keys.F)
+            else if (timeline != null && key == Keys.F)
             {
-                animPlayer.Seek(animPlayer.StartFrame);
-                Console.WriteLine($"[Demo] 动画帧：{animPlayer.CurrentFrame:F1}（首帧）");
+                timeline.Seek(timeline.StartFrame);
+                Console.WriteLine($"[Demo] 时间轴帧：{timeline.CurrentFrame:F1}（首帧）");
+            }
+            else if (timeline != null && key == Keys.LeftBracket)
+            {
+                // 任意帧导入：把 test1.vmd 的第 0 帧落在时间轴当前位置（演示空白保留 + 区间并集 + 表示枠 AND）
+                if (importedLayer != null)
+                {
+                    Console.WriteLine($"[Demo] 已有导入层 {importedFile}（帧 {importedLayer.ActiveStart:F0} 起），按 ] 先移除");
+                }
+                else
+                {
+                    string? path = FindMotionFile("test1.vmd");
+                    if (path is null)
+                    {
+                        Console.WriteLine("[Demo] 未找到 Motion/test1.vmd，无法导入");
+                    }
+                    else
+                    {
+                        try
+                        {
+                            var vmd = VmdParser.Parse(File.ReadAllBytes(path));
+                            var bound = MmdAnimation.FromVmd(vmd).Bind(target.Model);
+                            importedFile = Path.GetFileName(path);
+                            importedWeight = 1f;
+                            importedLayer = timeline.AddLayer(new MmdAnimationLayer(bound) { Weight = importedWeight },
+                                importAt: timeline.CurrentFrame);
+                            Console.WriteLine($"[Demo] 导入 {importedFile}：第 0 帧落在时间轴 {timeline.CurrentFrame:F1} | " +
+                                              $"区间 {importedLayer.ActiveStart:F0}..{importedLayer.ActiveEnd:F0} | " +
+                                              $"表示枠键 {bound.PropertyKeyCount}（含非表示窗口，可观察 AND 合并）");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Demo] 导入失败：{ex.Message}");
+                        }
+                    }
+                }
+            }
+            else if (timeline != null && key == Keys.RightBracket)
+            {
+                if (importedLayer == null)
+                {
+                    Console.WriteLine("[Demo] 没有导入层可移除（按 [ 先导入）");
+                }
+                else if (timeline.RemoveLayer(importedLayer))
+                {
+                    // 下一帧 Apply：该层轨道自动回绑定姿势、表示枠投票解除（整体写回语义，无残留）
+                    Console.WriteLine($"[Demo] 已移除导入层 {importedFile}（区间缩为 {timeline.StartFrame:F0}..{timeline.EndFrame:F0}）");
+                    importedLayer = null;
+                    importedFile = "";
+                }
+            }
+            else if (timeline != null && key == Keys.Semicolon)
+            {
+                if (importedLayer == null)
+                {
+                    Console.WriteLine("[Demo] 没有导入层（按 [ 先导入）");
+                }
+                else
+                {
+                    importedWeight = importedWeight switch { 1f => 0.5f, 0.5f => 0f, _ => 1f };
+                    importedLayer.Weight = importedWeight;
+                    Console.WriteLine($"[Demo] {importedFile} 权重 → {importedWeight}" +
+                                      (importedWeight == 0f ? "（不贡献：该层轨道回绑定姿势）" : ""));
+                }
+            }
+            else if (timeline != null && key == Keys.Apostrophe)
+            {
+                Console.WriteLine($"[Demo] 层列表（区间 {timeline.StartFrame:F0}..{timeline.EndFrame:F0} | 游标 {timeline.CurrentFrame:F1} | 可见 {timeline.Mixer.Visible}）：");
+                foreach (var (desc, file, layer) in baseLayers)
+                    PrintLayer(desc, file, layer, timeline);
+                if (importedLayer != null)
+                    PrintLayer("导入", importedFile, importedLayer, timeline);
             }
             else if (key == Keys.M)
             {
@@ -362,7 +439,7 @@ window.Load += () =>
     }
 
     Console.WriteLine("[Demo] 鼠标: 左键=旋转 | 右键=平移 | 滚轮=缩放 | B=弯曲测试 | E=轮廓线 | 1/2/0=自阴影 | S=影风格 | Z=中间RT预览 | R=重置");
-    Console.WriteLine("[Demo] 动画: 空格=暂停 | ←/→=∓1帧 | ↑/↓=帧率±6 | F=首帧 | V=动画驱动开关 | M=表情驱动开关");
+    Console.WriteLine("[Demo] 动画: 空格=暂停 | ←/→=∓1帧 | ↑/↓=帧率±6 | F=首帧 | [=导入VMD到当前帧 | ]=移除导入层 | ;=导入层权重 | '=层列表 | V=动画驱动开关 | M=表情驱动开关");
 
     if (smoke)
     {
@@ -386,7 +463,15 @@ byte[]? smokeFloorOn = null;   // 影模式 2（含床影）
 window.Render += dt =>
 {
     if (smoke && ++smokeFrame > 40) { window.Close(); return; }
-    if (animSmoke && ++animSmokeFrame > 90) { window.Close(); return; }
+    if (animSmoke && ++animSmokeFrame > 90)
+    {
+        // 混合求值耗时统计（验收「播放无异常」之外的效率观测）
+        if (applyCount > 0)
+            Console.WriteLine($"[anim-smoke] Apply ×{applyCount} 帧：平均 {applyTicksTotal / applyCount * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency:F1} μs | " +
+                              $"最大 {applyTicksMax * 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency:F1} μs");
+        window.Close();
+        return;
+    }
     if (device == null || grid == null) return;
 
     device.BeginFrame();
@@ -412,15 +497,20 @@ window.Render += dt =>
         //   再由 PrepareFrame 重算世界/蒙皮矩阵并上传。影图 pass 与主渲染读同一份本帧姿态。
         // 里程碑 B（Step 5a-1）：采样只写「原始」表情权重，随后由 MmdMorphEvaluator 做 Group
         //   传播并把骨 morph 折进局部 T/R —— 必须早于 PrepareFrame 的 UpdateWorldMatrices。
-        if (mixer != null && animPlayer != null && animationEnabled)
+        if (timeline != null && animationEnabled)
         {
-            animPlayer.Advance(dt);
+            timeline.Advance(dt);
             bool wasVisible = model.Model.Visible;
-            // Step 5d-3：多层混合求值（活跃层采样 → 加权混合 → 可见性 AND → 整体写回）。
-            // 采样是帧号的纯函数，seek ≡ 连续播放；未激活层不贡献（空白保留）。
-            mixer.Evaluate(model.Model, animPlayer.CurrentFrame);
-            if (mixer.Visible != wasVisible)
-                Console.WriteLine($"[Demo] 表示枠：{(mixer.Visible ? "显示" : "非表示")}（帧 {animPlayer.CurrentFrame:F1}）");
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            // Step 5d-4：时间轴推进 + 混合求值（活跃层采样 → 加权混合 → 可见性 AND → 整体写回）。
+            // 采样是帧号的纯函数，seek ≡ 连续播放；未激活/已移除的层不贡献（空白保留、无残留）。
+            timeline.Apply(model.Model);
+            long ticks = sw.ElapsedTicks;
+            applyTicksTotal += ticks;
+            applyTicksMax = Math.Max(applyTicksMax, ticks);
+            applyCount++;
+            if (timeline.Mixer.Visible != wasVisible)
+                Console.WriteLine($"[Demo] 表示枠：{(timeline.Mixer.Visible ? "显示" : "非表示")}（帧 {timeline.CurrentFrame:F1}）");
             // M 键关掉表情驱动时把权重清零（VMD 的 morph 轨道不再生效）：
             // 用于「权重全 0 ⇒ 画面与 Step 4 完全一致」的回归基线。
             if (!morphEnabled) model.Model.ResetMorphWeights();
@@ -441,9 +531,9 @@ window.Render += dt =>
             morphDiagPrinted = true;
         }
 
-        // --anim-smoke：定期打印混合器状态（帧游标 / 可见性 / 活跃 morph 数 / 中心骨旋转量），
+        // --anim-smoke：定期打印时间轴/混合器状态（帧游标 / 可见性 / 活跃 morph 数 / 中心骨姿态），
         // 证明四层混合真的在驱动模型；跑满 90 帧后由循环开头的计数器退出。
-        if (animSmoke && animPlayer != null && mixer != null &&
+        if (animSmoke && timeline != null &&
             (animSmokeFrame == 1 || animSmokeFrame % 30 == 0))
         {
             int activeMorphs = 0;
@@ -457,8 +547,8 @@ window.Render += dt =>
                 offsetLen = System.Numerics.Vector3.Distance(
                     model.Model.LocalPositions[centerIndex], model.Model.LocalTranslations[centerIndex]);
             }
-            Console.WriteLine($"[anim-smoke] 渲染帧 {animSmokeFrame:D3} | 动画帧 {animPlayer.CurrentFrame:F1} | " +
-                              $"Visible={mixer.Visible} | 活跃 morph {activeMorphs} | " +
+            Console.WriteLine($"[anim-smoke] 渲染帧 {animSmokeFrame:D3} | 时间轴帧 {timeline.CurrentFrame:F1} | " +
+                              $"Visible={timeline.Mixer.Visible} | 活跃 morph {activeMorphs} | " +
                               $"センター 位移 {offsetLen:F2} / 旋转 {angleDeg:F1}°");
         }
 
@@ -622,6 +712,15 @@ return 0;
         c[12], c[13], c[14], c[15]);
 
 static string Fmt(System.Numerics.Vector3 v) => $"({v.X:F1}, {v.Y:F1}, {v.Z:F1})";
+
+// ── ' 键用：打印一层的导入点 / 区间 / 权重 / 当前活跃性与表示枠 ──────────────
+static void PrintLayer(string desc, string file, MmdAnimationLayer layer, MmdTimeline timeline)
+{
+    double local = timeline.CurrentFrame - layer.Offset;
+    Console.WriteLine($"[Demo]   {desc}（{file}）| 导入帧 {layer.Offset:F0} | 区间 {layer.ActiveStart:F0}..{layer.ActiveEnd:F0}" +
+                      $" | 权重 {layer.Weight} | 当前{(layer.IsActive(timeline.CurrentFrame) ? "活跃" : "不活跃")}" +
+                      $" | 本地帧 {local:F1} | 该层表示枠 {(layer.IsVisibleAt(layer.Loop ? layer.ToLocal(timeline.CurrentFrame) : local) ? "显示" : "非表示")}");
+}
 
 // ── --smoke 用：读回默认帧缓冲，做校验和 / 差异统计 ──────────────────────
 // 自阴影的最终验收只能看"画面到底变了没有"：中间 RT 有数据 ≠ 主渲染用上了它

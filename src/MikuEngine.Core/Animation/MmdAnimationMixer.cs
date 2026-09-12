@@ -43,6 +43,17 @@ public sealed class MmdAnimationMixer
     }
 
     /// <summary>
+    /// 移除一层，返回是否确实存在并被移除。
+    ///
+    /// 下一帧 <see cref="Evaluate"/> 时该层的轨道即成为「未覆盖项」自动写回绑定姿势 / morph 0、
+    /// 可见性 AND 投票自动少一票 —— 整体写回语义保证无残留，无需任何手动清理。
+    /// </summary>
+    public bool RemoveLayer(MmdAnimationLayer layer) => _layers.Remove(layer);
+
+    /// <summary>移除全部层（语义同 <see cref="RemoveLayer"/>：下一帧整模型回绑定姿势、恒可见）。</summary>
+    public void ClearLayers() => _layers.Clear();
+
+    /// <summary>
     /// 各层活跃区间 <c>[ActiveStart, ActiveEnd]</c> 的并集（时间轴帧）。
     /// 无任何层 / 全部区间倒置时返回 <c>(0, 0)</c>。
     ///
