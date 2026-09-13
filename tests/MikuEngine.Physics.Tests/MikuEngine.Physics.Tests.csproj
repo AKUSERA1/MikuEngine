@@ -21,6 +21,11 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <!-- 物理 math 黄金基准（由 TestData/gen_physics_math_golden.mjs 用 Node 直跑 reze src 生成） -->
+  <ItemGroup>
+    <Content Include="TestData\physics_math.golden.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\src\MikuEngine.Physics\MikuEngine.Physics.csproj" />
     <ProjectReference Include="..\..\src\MikuEngine.Core\MikuEngine.Core.csproj" />

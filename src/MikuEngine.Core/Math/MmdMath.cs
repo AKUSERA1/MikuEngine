@@ -1,9 +1,13 @@
-﻿using System.Numerics;
+using System.Numerics;
 
 namespace MikuEngine.Core.Math;
 
 /// <summary>
-/// MMD 专用数学工具。注意：MMD 使用列主序矩阵，与 System.Numerics.Matrix4x4 约定一致。
+/// MMD 专用数学工具。矩阵约定：MMD/PMX 是列主序存储 + 列向量乘法（M·v，平移在 m[12..14]），
+/// 与 System.Numerics.Matrix4x4 的行主序存储 + 行向量乘法（v·M，XNA 血统）互为转置——
+/// 两者并不一致（此前头注释的说法有误）。跨约定传递矩阵必须显式转置并注释理由。
+/// 物理与骨骼同步路径一律使用列主序的 MikuEngine.Core.Math.Mat4；
+/// System.Numerics 的 Vector3/Quaternion 不涉及存储约定，可放心使用。
 /// </summary>
 public static class MmdMath
 {
