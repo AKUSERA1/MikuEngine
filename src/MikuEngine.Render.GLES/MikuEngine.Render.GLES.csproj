@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MikuEngine.Core\MikuEngine.Core.csproj" />
+    <ProjectReference Include="..\MikuEngine.Physics\MikuEngine.Physics.csproj" />
   </ItemGroup>
 
   <ItemGroup>

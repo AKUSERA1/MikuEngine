@@ -5,6 +5,7 @@ using Silk.NET.GLFW;
 using MikuEngine.Core.Animation;
 using MikuEngine.Core.Camera;
 using MikuEngine.Core.Models;
+using MikuEngine.Physics;
 using MikuEngine.Render.GLES;
 using MikuEngine.Engine;
 
@@ -25,6 +26,7 @@ using MikuEngine.Engine;
 //     动作+IK.vmd（骨动效 + 足ＩＫ/つま先ＩＫ 目标 + 表情，单层播放）
 //     —— 原 Motion.vmd + Lips/Eyes/Facial 四层组合保留在 motionFiles 的注释里，需要时一行切回
 //   空格 ：暂停/播放 | ←/→ ：∓1 帧 | ↑/↓ ：帧率 ±6 | F ：回首帧 | V ：动画驱动开关
+//   P    ：物理模拟开关（Stage 1 S1；裙/发/胸随动效摆动，OFF 回纯动画，OFF→ON 自动 snap）
 //   [    ：把 test1.vmd 导入当前帧（任意帧导入演示） | ] ：移除导入层 | ; ：导入层权重循环 | ' ：层列表
 //
 // --smoke     ：无人值守自检。隐藏窗口跑 40 帧 → 强制开影模式 1 → 打印中间 RT 统计 → 退出。
@@ -118,6 +120,9 @@ float importedWeight = 1f;                 // ; 键循环 1 → 0.5 → 0
 bool animationEnabled = true;
 bool morphEnabled = true;      // M 键切换：关时把表情权重全清零（回归基线用）
 bool morphDiagPrinted = false; // 首次有表情真正生效时打一条诊断
+// Stage 1 S1 物理总开关（P 键切换）。默认开（MMD 行为：物理常开）；
+// --ik-smoke 隔离验收时默认关，避免物理写回污染 IK 诊断读数。
+bool physicsEnabled = !ikSmoke;
 long applyTicksTotal = 0; int applyCount = 0; long applyTicksMax = 0;   // --anim-smoke 耗时统计
 
 window.Load += () =>
@@ -141,6 +146,26 @@ window.Load += () =>
     // 法线偏移偏置（reze §2 #5）：按 1.5 × 世界 texel 接线，随紧视锥密度自适应
     //（须在 UpdateLight 之后取，半宽在那里定）。缩放模型或换密度档后需重接。
     model.ShadowNormalOffset = shadow.TexelWorld * 1.5f;
+
+    // ── Stage 1 S1：物理内核（RezePhysics 移植，B5/B6）───────────────────
+    // PMX 刚体/关节 → 内核 def（reze pmx-loader 的模式映射），内核自带模型空间
+    // 地面体（顶面 y=0，让裙摆/头发停在地面）。骨骼索引与 PMX 保序一致，
+    // RigidBodyDef.BoneIndex 直接对应 model.Model 的骨骼下标。
+    try
+    {
+        var pmxData = PmxParser.Parse(File.ReadAllBytes(pmxPath));
+        var rbDefs = pmxData.RigidBodies.Select(RigidBodyDef.FromPmx).ToArray();
+        var jDefs = pmxData.Joints.Select(JointDef.FromPmx).ToArray();
+        model.Physics = new MMDPhysics(rbDefs, jDefs);
+        int dyn = rbDefs.Count(d => d.Type == RigidbodyType.Dynamic);
+        int aligned = rbDefs.Count(d => d.Aligned);
+        Console.WriteLine($"[Demo] 物理内核：刚体 {rbDefs.Length}（动态 {dyn} / mode2 对齐 {aligned}）| 关节 {jDefs.Length} | 内置地面（模型空间 y=0）");
+        Console.WriteLine("[Demo] 物理: P=开关（默认开；OFF→ON 自动 snap 到当前姿态，无跳变）");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Demo] 物理初始化失败（本模型不接物理）：{ex.Message}");
+    }
 
     // ── 诊断输出 ────────────────────────────────────────────────────────
     var m = model.Model;
@@ -426,6 +451,11 @@ window.Load += () =>
                                   $" | 当前活跃 {active} 条" +
                                   $" | 本帧脏区顶点 {model?.MorphTouchedVertexCount ?? 0}");
             }
+            else if (key == Keys.P)
+            {
+                physicsEnabled = !physicsEnabled;
+                Console.WriteLine($"[Demo] 物理模拟：{(physicsEnabled ? "开" : "关")}（S1；OFF 期间骨骼保持纯动画，OFF→ON 自动 snap 无跳变）");
+            }
             else if (key == Keys.V)
             {
                 animationEnabled = !animationEnabled;
@@ -470,6 +500,7 @@ window.Load += () =>
 
     Console.WriteLine("[Demo] 鼠标: 左键=旋转 | 右键=平移 | 滚轮=缩放 | B=弯曲测试 | E=轮廓线 | 1/2/0=自阴影 | S=影风格 | Z=中间RT预览 | R=重置");
     Console.WriteLine("[Demo] 动画: 空格=暂停 | ←/→=∓1帧 | ↑/↓=帧率±6 | F=首帧 | [=导入VMD到当前帧 | ]=移除导入层 | ;=导入层权重 | '=层列表 | V=动画驱动开关 | M=表情驱动开关");
+    Console.WriteLine("[Demo] 物理: P=物理模拟开关（S1，默认开；裙/发/胸随动效摆动，关闭回纯动画）");
 
     if (smoke)
     {
@@ -572,6 +603,15 @@ window.Render += dt =>
         }
         // 阶段 0：帧首统一上传（重算蒙皮矩阵 + UBO + 蒙皮 SSBO），
         // 影图 pass 与主渲染都读同一份、且是本帧的最新值（修复了上一帧滞后的坑）。
+        // Stage 1 S1：物理 tick 时钟由动画帧号驱动（timeline.CurrentFrame）——暂停/未加载
+        // 时帧号不推进 → advance=0 → 物理冻结（MMD 行为）；帧率变化同步给内核（tick 时长
+        // = 1/(fps×k)，teleport 阈值同源）。
+        if (model.Physics != null)
+        {
+            model.Physics.PlaybackFps = timeline?.PlaybackFps ?? 30f;
+            model.PhysicsFrame = timeline?.CurrentFrame ?? 0;
+            model.PhysicsEnabled = physicsEnabled;
+        }
         model.PrepareFrame(in frame);
 
         // --ik-smoke：IK 验收。量化「目标（足ＩＫ）与实际被驱动端（足首）的距离」——

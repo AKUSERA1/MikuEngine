@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 using MikuEngine.Core.Animation;
+using MikuEngine.Physics;
 using Silk.NET.OpenGL;
 
 namespace MikuEngine.Render.GLES;
@@ -408,6 +409,60 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         _device.UpdateUbo(_frameUbo, ref uniforms);
     }
 
+    // ── Stage 1 S1 物理段（MMDPhysics 集成，方案 B6）────────────────────────
+
+    /// <summary>
+    /// 物理内核实例（宿主加载时构造并注入；null = 模型未接物理）。
+    /// 刚体/关节数据来自 PmxModelData（RigidBodyDef.FromPmx / JointDef.FromPmx）。
+    /// </summary>
+    public MMDPhysics? Physics { get; set; }
+
+    /// <summary>S1 物理总开关（场景配置，宿主按键切换）。OFF 期间骨骼世界矩阵保持纯动画结果。</summary>
+    public bool PhysicsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// 本渲染帧的连续动画帧号（宿主从 MmdTimeline.CurrentFrame 注入）。物理 tick 时钟
+    /// tickTarget = floor(frame × k) 由它驱动——动画暂停/未加载时帧号不推进，物理随之
+    /// 冻结（MMD 行为：物理随动画走）。
+    /// </summary>
+    public double PhysicsFrame { get; set; }
+
+    private float[]? _physBoneWorld;
+    private float[]? _physBoneInvBind;
+    private double _physPrevFrame;
+    private bool _physHasPrev;
+
+    /// <summary>
+    /// 一渲染帧的物理段：骨骼世界矩阵转列主序 → 内核 <see cref="MMDPhysics.Update"/>
+    /// （S1 gate + tick 时钟 + 三相位）→ 写回行主序 WorldMatrices → 重算蒙皮矩阵。
+    /// 逆绑定矩阵是常量，列主序副本只转一次。
+    /// </summary>
+    private void RunPhysics()
+    {
+        MMDPhysics phys = Physics!;
+        var m = _model;
+        int n = m.BoneCount;
+
+        if (_physBoneWorld == null || _physBoneWorld.Length != n * 16)
+        {
+            _physBoneWorld = new float[n * 16];
+            _physBoneInvBind = new float[n * 16];
+            MMDPhysics.CopyMatricesToColumnMajor(m.InverseBind, _physBoneInvBind);
+        }
+
+        MMDPhysics.CopyMatricesToColumnMajor(m.WorldMatrices, _physBoneWorld);
+        double frame = PhysicsFrame;
+        phys.Update(PhysicsEnabled, _physBoneWorld, _physBoneInvBind, frame, _physHasPrev ? _physPrevFrame : frame);
+        _physHasPrev = true;
+        _physPrevFrame = frame;
+
+        // 物理写回只涉及带刚体的骨骼，但全量转回 + 全量蒙皮重算是 O(骨数) 的 4x4 乘，
+        // 远低于一次 IK 求解，不值得做稀疏差分。
+        MMDPhysics.CopyColumnMajorToMatrices(_physBoneWorld, m.WorldMatrices);
+        for (int i = 0; i < n; i++)
+            m.SkinMatrices[i] = m.InverseBind[i] * m.WorldMatrices[i];
+    }
+
     /// <summary>
     /// 帧首统一准备：重算世界/蒙皮矩阵 + 上传 UBO + 上传蒙皮矩阵 SSBO。
     ///
@@ -429,6 +484,10 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         MmdIkSolver.Solve(_model);
 
         _model.UpdateWorldMatrices();
+        // Stage 1 S1 物理段（方案 B6 每帧序）：FK/IK/付与 → 物理（SetKinematicTargets →
+        // Step → WriteBack）。物理驱动骨的世界矩阵被改写后立即重算蒙皮，影图 pass 与
+        // 主渲染读到的都是本帧物理后的姿态。
+        if (Physics != null) RunPhysics();
         UploadFrame(in frame);
         _skin.BeginFrame();
         SkinMatrixBaseOffset = _skin.Append(_model.SkinMatrices);

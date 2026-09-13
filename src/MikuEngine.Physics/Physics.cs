@@ -13,9 +13,11 @@ namespace MikuEngine.Physics;
 /// back via bodyWorld × bodyOffsetInverse.
 ///
 /// reze 把这些塞在一个 step(dt, bones, binds) 里；C# 侧拆成与渲染帧序对应的
-/// 三个相位，中间留给 S1 gate（方案 B6）：
-///   FK/IK/付与 → <see cref="SetKinematicTargets"/> → S1 gate →
-///   <see cref="Step"/> → <see cref="WriteBack"/>
+/// 三个相位，由 <see cref="Update"/>（B6 引擎主入口）串起：
+///   FK/IK/付与 → <see cref="Update"/>（= SetKinematicTargets → Step(ticks) → WriteBack）
+/// 时钟（B6）：tickTarget = floor(动画帧号 × k)，k=<see cref="TickRateMultiplier"/>，
+/// 每 tick 固定 <see cref="TickDuration"/> 秒；物理状态是帧号的纯函数，与渲染率/
+/// 时钟模式解耦（DET-1/DET-2 的确定性契约）。
 /// dt 语义：**动画秒**（帧号差 × 1/PlaybackFps），不是 wall dt——teleport 阈值
 /// "250 units/s 按帧时间缩放"在 FrameLocked/RealTime 两种时钟下都必须以帧号域
 /// 换算后的 dt 计，否则阈值失真（方案 §6.4）。
@@ -34,8 +36,31 @@ public sealed class MMDPhysics
     private readonly SolverCache _solverCache;
     private readonly ContactPool _contacts;
     private bool _firstFrame = true;
-    private float _timeAccum;
-    private const float FixedTimeStep = 1f / 60f;
+
+    /// <summary>
+    /// 动画帧率（MMD 标准 30）。tick 时长 = 1/(PlaybackFps × <see cref="TickRateMultiplier"/>)；
+    /// 默认 30×2 → 60Hz 物理步长。变更时失效 World 的阻尼因子缓存（按 dt 键控）。
+    /// </summary>
+    public float PlaybackFps
+    {
+        get => _playbackFps;
+        set
+        {
+            if (_playbackFps == value) return;
+            _playbackFps = value;
+            _world.InvalidateDampingCache();
+        }
+    }
+    private float _playbackFps = 30f;
+
+    /// <summary>
+    /// B6 tick 时钟倍率 k（方案 §4-B6：每动画帧 k 个物理 tick，固定 2 = Standard 档，
+    /// 无 UI 档位）。tickTarget = floor(动画帧号 × k)。
+    /// </summary>
+    public const int TickRateMultiplier = 2;
+
+    /// <summary>单个物理 tick 的时长（动画域秒）。</summary>
+    public float TickDuration => 1f / (_playbackFps * TickRateMultiplier);
 
     /// <summary>
     /// reze 的 maxSubSteps=6 之外还有一道 wall-time 预算（performance.now EMA
@@ -44,6 +69,11 @@ public sealed class MMDPhysics
     /// 一致），且掉帧追赶的上限语义由 tickTarget 差值天然表达。
     /// </summary>
     private const int MaxCatchUp = 8;
+
+    // tick 时钟基准：上一渲染帧已消费到的 tickTarget。advance = 本帧 tickTarget − 它。
+    private int _lastTickTarget;
+    // S1 开关的上一帧状态（OFF→ON 边沿检测）。开关状态属场景配置，纳入 DET 范围。
+    private bool _wasEnabled;
 
     // Fixed-timestep render interpolation ("Fix Your Timestep"): the dynamic body pose is
     // rendered as lerp(prev, curr, alpha) between the last two completed substeps, where
@@ -79,6 +109,16 @@ public sealed class MMDPhysics
     // Debug counter: frames on which a teleport (scrub/jump discontinuity)
     // was detected and settled.
     public int TeleportCount { get; private set; }
+
+    // B6 tick 域 target 采样：上一渲染帧的骨骼世界矩阵快照（帧末缓存）。
+    // kinematic 目标表达到「本帧末 tick 时刻」的骨骼姿态 = lerp(prevBone, curBone, s)，
+    // s 由帧号域解析——这样 target 是动画帧号的纯函数，物理状态与渲染率解耦
+    // （DET-2：144Hz RealTime 与 FrameLocked 在同帧号处逐位一致）。
+    private float[] _prevBoneWorld = Array.Empty<float>();
+    private float[] _boneSample = Array.Empty<float>();
+    private bool _hasPrevBone;
+    private static readonly float[] SampleQa = new float[4];
+    private static readonly float[] SampleQb = new float[4];
 
     /// <summary>Where the floor body actually lives. <see cref="RigidBodyStore.GroundIndex"/>
     /// is the SWITCH — see <see cref="SetFloor"/> — and forgets it.</summary>
@@ -332,15 +372,148 @@ public sealed class MMDPhysics
         Array.Copy(_store.Orientations, _kinTargetOri, _kinTargetOri.Length);
         Array.Clear(_kinTargetVel, 0, _kinTargetVel.Length);
         Array.Clear(_kinTargetAngVel, 0, _kinTargetAngVel.Length);
-        _timeAccum = 0;
+    }
+
+    /// <summary>
+    /// B6 引擎主入口：S1 gate + tick 时钟 + 三相位，一次调用完成一渲染帧的物理段。
+    /// 调用方在 FK/IK/付与（<c>SkeletalModel.UpdateWorldMatrices</c>）之后调用。
+    ///
+    /// S1 语义（方案 §4-B6）：OFF = 跳过整个物理段，骨骼世界矩阵保持动画结果
+    /// （本方法不碰 boneWorldMatrices）；OFF→ON 边沿强制 <see cref="Reset"/>
+    /// （snap 当前骨骼姿态 + 速度清零 + tick 基准同步，首帧无跳变）；ON→OFF
+    /// 无操作（物理体留在原地，骨骼自然回动画姿态）。开关状态属场景配置，
+    /// 纳入 DET 范围——同配置双跑的 enabled 序列相同 ⇒ 状态序列相同。
+    ///
+    /// tick 时钟：<c>tickTarget = floor(frame × k)</c>（k=<see cref="TickRateMultiplier"/>），
+    /// 本帧前进 advance = tickTarget − 上帧 tickTarget 个固定 tick；alpha =
+    /// frame × k 的小数部分（Fix Your Timestep 的渲染插值相位）。advance ≤ 0
+    /// （暂停/回卷）不推进模拟——回卷的骨骼突变由 teleport 检测兜底（carry/snap）。
+    /// </summary>
+    /// <param name="enabled">S1 物理总开关（场景配置）。</param>
+    /// <param name="boneWorldMatrices">骨骼世界矩阵（列主序 float[16×骨数]，FK/IK/付与结果）。</param>
+    /// <param name="boneInverseBindMatrices">骨骼逆绑定矩阵（同布局；仅首帧初始化用）。</param>
+    /// <param name="frame">当前连续动画帧号（<c>MmdAnimationPlayer.CurrentFrame</c>）。</param>
+    /// <param name="prevFrame">上一渲染帧的动画帧号。</param>
+    public void Update(bool enabled, float[] boneWorldMatrices, float[] boneInverseBindMatrices, double frame, double prevFrame)
+    {
+        if (!enabled)
+        {
+            _wasEnabled = false;
+            return;
+        }
+
+        double frameK = frame * TickRateMultiplier;
+        int tickTarget = (int)System.Math.Floor(frameK + 1e-4);
+        // 1e-4 吸收 RealTime 连续游标的 double 累积误差（帧号域真差异 ≥ 0.5 帧），
+        // 差值可能微负 → clamp 到 [0,1)。
+        float alpha = (float)(frameK - System.Math.Floor(frameK + 1e-4));
+        if (alpha < 0) alpha = 0;
+        else if (alpha >= 1f) alpha = 0.999999f;
+
+        if (!_wasEnabled)
+        {
+            // OFF→ON：snap 到当前骨骼姿态并同步 tick 基准，使 ON 首帧
+            // advance=0（只 snap 不模拟）——写回 == snap 姿态 == 动画，无跳变。
+            Reset(boneWorldMatrices);
+            _lastTickTarget = tickTarget;
+            _wasEnabled = true;
+        }
+
+        int advance = tickTarget - _lastTickTarget;
+        _lastTickTarget = tickTarget;
+
+        // teleport 阈值按渲染帧动画时长（§6.4：250 units/s 按帧时间缩放）。
+        float dtAnim = (float)((frame - prevFrame) / PlaybackFps);
+        if (dtAnim < 0) dtAnim = 0;
+
+        // 目标采样到本帧末 tick 时刻（帧号 tickTarget/k）：target 成为帧号的
+        // 纯函数，渲染率只影响采样密度、不影响 tick 时刻的采样值（DET-2）。
+        float boneSampleT = 1f;
+        if (advance > 0 && _hasPrevBone && frame > prevFrame && _prevBoneWorld.Length == boneWorldMatrices.Length)
+        {
+            double tickEndFrame = tickTarget / (double)TickRateMultiplier;
+            double s = (tickEndFrame - prevFrame) / (frame - prevFrame);
+            boneSampleT = s < 0 ? 0 : (s > 1 ? 1 : (float)s);
+        }
+
+        RefreshKinematicTargets(boneWorldMatrices, boneInverseBindMatrices,
+            dtAnim, advance * TickDuration, boneSampleT, advance > 0);
+        Step(advance);
+        WriteBack(boneWorldMatrices, alpha);
+
+        // 帧末快照骨骼矩阵，供下一渲染帧的 tick 域采样。
+        if (_prevBoneWorld.Length != boneWorldMatrices.Length)
+        {
+            _prevBoneWorld = new float[boneWorldMatrices.Length];
+            _boneSample = new float[boneWorldMatrices.Length];
+        }
+        Array.Copy(boneWorldMatrices, _prevBoneWorld, boneWorldMatrices.Length);
+        _hasPrevBone = true;
+    }
+
+    /// <summary>
+    /// 宿主矩阵转换：SkeletalModel 的 <c>WorldMatrices</c>/<c>InverseBind</c> 是
+    /// System.Numerics 行主序（v·M，平移在 M41..43），物理内核是列主序（M·v，
+    /// 平移在 m[12..14]）。两者是**同一个变换的转置表示**：行主序存 Tᵀ 的线性
+    /// 序列 == 列主序存 T 的线性序列，因此正确转换就是 16 float 线性直拷
+    /// （§2.3.2 约定陷阱）。切不可再按下标重排——那会对已转置的存储再转一次，
+    /// 内核收到 Mᵀ：平移丢失进 w、旋转反向，蒙皮炸成薄片。
+    /// </summary>
+    public static void CopyMatricesToColumnMajor(System.Numerics.Matrix4x4[] source, float[] destination)
+    {
+        for (int i = 0; i < source.Length; i++)
+        {
+            ref System.Numerics.Matrix4x4 m = ref source[i];
+            int o = i * 16;
+            destination[o + 0] = m.M11; destination[o + 1] = m.M12; destination[o + 2] = m.M13; destination[o + 3] = m.M14;
+            destination[o + 4] = m.M21; destination[o + 5] = m.M22; destination[o + 6] = m.M23; destination[o + 7] = m.M24;
+            destination[o + 8] = m.M31; destination[o + 9] = m.M32; destination[o + 10] = m.M33; destination[o + 11] = m.M34;
+            destination[o + 12] = m.M41; destination[o + 13] = m.M42; destination[o + 14] = m.M43; destination[o + 15] = m.M44;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="CopyMatricesToColumnMajor"/> 的逆：内核写回的列主序骨骼矩阵 →
+    /// 宿主行主序 <see cref="System.Numerics.Matrix4x4"/>（渲染层用它替换
+    /// <c>WorldMatrices</c> 后重算蒙皮）。同为线性直拷，见上函数注释。
+    /// </summary>
+    public static void CopyColumnMajorToMatrices(float[] source, System.Numerics.Matrix4x4[] destination)
+    {
+        for (int i = 0; i < destination.Length; i++)
+        {
+            int o = i * 16;
+            destination[i] = new System.Numerics.Matrix4x4(
+                source[o + 0], source[o + 1], source[o + 2], source[o + 3],
+                source[o + 4], source[o + 5], source[o + 6], source[o + 7],
+                source[o + 8], source[o + 9], source[o + 10], source[o + 11],
+                source[o + 12], source[o + 13], source[o + 14], source[o + 15]);
+        }
     }
 
     /// <summary>
     /// 相位 1：从当前骨骼姿态计算本帧 kinematic 目标，检测 teleport 并执行
     /// carry/snap。返回是否发生 teleport（teleport 计数见 <see cref="TeleportCount"/>）。
     /// 首帧自动完成 reze firstFrame 初始化（computeBoneOffsets + snap + seed）。
+    /// dt 为动画域帧时间（teleport 阈值与目标轨迹速度都用它）——B5 直调路径，
+    /// 引擎主路径走 <see cref="Update"/>（tick 域采样）。
     /// </summary>
     public bool SetKinematicTargets(float[] boneWorldMatrices, float[] boneInverseBindMatrices, float dt)
+    {
+        return RefreshKinematicTargets(boneWorldMatrices, boneInverseBindMatrices, dt, dt, 1f, true);
+    }
+
+    /// <summary>
+    /// kinematic 目标核心。<paramref name="velocityDt"/>：目标差分的分母（动画域秒）——
+    /// tick 时钟下 = advance × TickDuration，与渲染率无关（DET-2 的另一半）；
+    /// <paramref name="dtThreshold"/>：teleport 阈值的帧时间（渲染帧动画时长）；
+    /// <paramref name="boneSampleT"/>：骨骼采样因子——&lt;1 时把目标表达到
+    /// 「本帧末 tick 时刻」（lerp 上一渲染帧与当前渲染帧骨骼矩阵），使 target
+    /// 成为帧号的纯函数；<paramref name="updateTargets"/>=false（tick 无进展的
+    /// 渲染帧）只保证首帧初始化，不重算 target/velocity、不判 teleport。
+    /// </summary>
+    private bool RefreshKinematicTargets(
+        float[] boneWorldMatrices, float[] boneInverseBindMatrices,
+        float dtThreshold, float velocityDt, float boneSampleT, bool updateTargets)
     {
         if (_firstFrame)
         {
@@ -356,6 +529,8 @@ public sealed class MMDPhysics
             _firstFrame = false;
         }
 
+        if (!updateTargets) return false;
+
         // Compute this frame's kinematic targets from the current bone pose. A
         // target jump beyond what continuous motion can produce (timeline scrub)
         // is a teleport, handled per kinematic root: rigidly carry that root's
@@ -363,22 +538,64 @@ public sealed class MMDPhysics
         // and keep simulating — dragging cloth through a discontinuity at the
         // raw derived velocity is what used to explode the solver. Chains under
         // unaffected roots keep their momentum untouched.
-        if (ComputeKinematicTargets(boneWorldMatrices, dt))
+        float[] source = boneWorldMatrices;
+        if (boneSampleT < 1f && _hasPrevBone && _prevBoneWorld.Length == boneWorldMatrices.Length)
+        {
+            SampleBonesAtTick(boneWorldMatrices, boneSampleT, boneWorldMatrices.Length / 16);
+            source = _boneSample;
+        }
+        bool teleport = ComputeKinematicTargets(source, dtThreshold, velocityDt);
+        if (teleport)
         {
             TeleportCount++;
             CarryDynamicThroughTeleport();
             SnapKinematicToTargets(true);
             SavePrevState(); // prev == curr so interpolation doesn't streak
-            return true;
         }
-        return false;
+        return teleport;
+    }
+
+    // 把骨骼世界矩阵插值到帧号域的 tick 时刻（prevBone→cur 的 s 处），写入
+    // _boneSample。位置线性 lerp、旋转最短弧 nlerp——帧内骨骼运动小，nlerp 与
+    // 精确 slerp 的差远小于渲染一帧的骨骼运动，而两跑（双模式）走同一条近似
+    // 路径，确定性不受影响。
+    private void SampleBonesAtTick(float[] cur, float s, int boneCount)
+    {
+        for (int b = 0; b < boneCount; b++)
+        {
+            int o = b * 16;
+            Mat4.ToQuatInto(_prevBoneWorld, o, SampleQa, 0);
+            Mat4.ToQuatInto(cur, o, SampleQb, 0);
+            float dot =
+                SampleQa[0] * SampleQb[0] + SampleQa[1] * SampleQb[1] +
+                SampleQa[2] * SampleQb[2] + SampleQa[3] * SampleQb[3];
+            if (dot < 0)
+            {
+                SampleQb[0] = -SampleQb[0]; SampleQb[1] = -SampleQb[1];
+                SampleQb[2] = -SampleQb[2]; SampleQb[3] = -SampleQb[3];
+            }
+            float qx = SampleQa[0] + (SampleQb[0] - SampleQa[0]) * s;
+            float qy = SampleQa[1] + (SampleQb[1] - SampleQa[1]) * s;
+            float qz = SampleQa[2] + (SampleQb[2] - SampleQa[2]) * s;
+            float qw = SampleQa[3] + (SampleQb[3] - SampleQa[3]) * s;
+            float len2 = qx * qx + qy * qy + qz * qz + qw * qw;
+            if (len2 > 1e-12f)
+            {
+                float inv = 1f / MathF.Sqrt(len2);
+                qx *= inv; qy *= inv; qz *= inv; qw *= inv;
+            }
+            float tx = _prevBoneWorld[o + 12] + (cur[o + 12] - _prevBoneWorld[o + 12]) * s;
+            float ty = _prevBoneWorld[o + 13] + (cur[o + 13] - _prevBoneWorld[o + 13]) * s;
+            float tz = _prevBoneWorld[o + 14] + (cur[o + 14] - _prevBoneWorld[o + 14]) * s;
+            Mat4.FromPositionRotationInto(tx, ty, tz, qx, qy, qz, qw, _boneSample, o);
+        }
     }
 
     // Fill kinTargetPos/kinTargetOri = boneWorld × bodyOffset for every bone-
     // bound Static/Kinematic body. Returns true if any target is discontinuous
     // with the current body pose — farther than continuous motion can carry it
     // in one render frame, or rotated more than 90°.
-    private bool ComputeKinematicTargets(float[] boneWorldMatrices, float dt)
+    private bool ComputeKinematicTargets(float[] boneWorldMatrices, float dt, float velocityDt)
     {
         int n = _store.Count;
         float[] offsets = _store.BodyOffsetMatrix;
@@ -401,7 +618,7 @@ public sealed class MMDPhysics
 
         float[] tv = _kinTargetVel;
         float[] tav = _kinTargetAngVel;
-        float invDt = dt > 0 ? 1f / dt : 0;
+        float invDt = velocityDt > 0 ? 1f / velocityDt : 0;
 
         for (int i = 0; i < n; i++)
         {
@@ -466,12 +683,14 @@ public sealed class MMDPhysics
     }
 
     /// <summary>
-    /// 相位 2：子步循环。dt 为动画域帧时间（与 <see cref="SetKinematicTargets"/>
-    /// 同源同值）；内部按 FixedTimeStep 累积，子步数上限 <see cref="MaxCatchUp"/>，
-    /// 超限丢余量并 snap kinematic 到目标（reze 的 backlog 分支）。
+    /// 相位 2：tick 子步循环（B6 tick 时钟）。<paramref name="tickAdvance"/> =
+    /// 本渲染帧 tickTarget 差值；每个 tick 固定 <see cref="TickDuration"/> 秒，
+    /// 上限 <see cref="MaxCatchUp"/>，超限丢余量并 snap kinematic 到目标
+    /// （reze 的 backlog 分支）。tick 数由帧号唯一决定 ⇒ 同帧号双跑逐位一致（DET-1）。
     /// </summary>
-    public void Step(float dt)
+    public void Step(int tickAdvance)
     {
+        if (tickAdvance <= 0) return;
         // Fixed-timestep substeps. The maxSubSteps cap prevents runaway after
         // a long stall (tab backgrounded, etc.). Snapshot the pose before each step so
         // after the loop prevState is one substep behind the live (current) state.
@@ -481,25 +700,22 @@ public sealed class MMDPhysics
         // sync-once-per-frame behavior exactly (no fractional lag trembling
         // against the rendered mesh), while at lower rates the per-substep
         // constraint error stays bounded to one fixed step of bone motion.
-        _timeAccum += dt;
-        int nSub = (int)(_timeAccum / FixedTimeStep);
-        if (nSub > MaxCatchUp) nSub = MaxCatchUp;
+        int nSub = tickAdvance > MaxCatchUp ? MaxCatchUp : tickAdvance;
+        float tickDt = TickDuration;
         for (int k = 0; k < nSub; k++)
         {
             SavePrevState();
             AdvanceKinematicToTargets(1f / (nSub - k));
-            _world.Step(_store, FixedTimeStep, _contacts, _constraints, _solverCache);
+            _world.Step(_store, tickDt, _contacts, _constraints, _solverCache);
             RestoreNonFiniteBodies();
-            _timeAccum -= FixedTimeStep;
         }
-        if (_timeAccum >= FixedTimeStep)
+        if (tickAdvance > MaxCatchUp)
         {
             // Substep budget exhausted mid-catchup: drop the remaining time and
             // snap kinematic bodies the rest of the way so they don't start next
             // frame lagging behind their bones. They keep the velocity their
             // trajectory implies — the character did move, and cloth in contact
             // needs to know that or it stops being dragged and starts juddering.
-            _timeAccum = 0;
             SnapKinematicToTargets(false, true);
         }
     }
@@ -775,16 +991,10 @@ public sealed class MMDPhysics
 
     /// <summary>
     /// 相位 3：pinned 对齐 + 以渲染插值位姿把动态体写回骨骼矩阵
-    /// （boneWorld = bodyWorld × bodyOffsetInverse）。alpha 缺省取内部累积余量
-    /// （Fix Your Timestep：alpha = timeAccum / FixedTimeStep ∈ [0,1)）；B6 的
-    /// tick 时钟也可显式传入。
+    /// （boneWorld = bodyWorld × bodyOffsetInverse）。
+    /// alpha ∈ [0,1)（Fix Your Timestep）：tick 时钟下 = 帧号 × k 的小数部分
+    /// （<see cref="Update"/> 计算），显示 lerp(上一 tick, 本帧末 tick, alpha)。
     /// </summary>
-    public void WriteBack(float[] boneWorldMatrices)
-    {
-        float alpha = FixedTimeStep > 0 ? _timeAccum / FixedTimeStep : 0;
-        WriteBack(boneWorldMatrices, alpha);
-    }
-
     public void WriteBack(float[] boneWorldMatrices, float alpha)
     {
         // MMD mode-2 bone alignment for pinned (depth-1) bodies: position

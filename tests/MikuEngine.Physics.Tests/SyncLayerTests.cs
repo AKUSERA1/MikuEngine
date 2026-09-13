@@ -22,7 +22,7 @@ public class SyncLayerTests
     /// A→B 关节在 B 中心：线性轴焊接、角度轴自由（M-CHAIN-1 同构摆锤）。
     /// 碰撞掩码 0：本组用例测同步层，不测碰撞。
     /// </summary>
-    private static (MMDPhysics Ph, float[] BoneWorld, float[] BoneInvBind) CreatePendulumRig()
+    internal static (MMDPhysics Ph, float[] BoneWorld, float[] BoneInvBind) CreatePendulumRig()
     {
         List<RigidBodyDef> defs =
         [
@@ -64,7 +64,7 @@ public class SyncLayerTests
         return (ph, boneWorld, boneInvBind);
     }
 
-    private static void SetBoneTranslation(float[] bones, int b, float x, float y, float z)
+    internal static void SetBoneTranslation(float[] bones, int b, float x, float y, float z)
     {
         Mat4.SetIdentity(bones, b * 16);
         bones[b * 16 + 12] = x;
@@ -72,12 +72,14 @@ public class SyncLayerTests
         bones[b * 16 + 14] = z;
     }
 
-    /// <summary>方案 B6 的每帧顺序（S1 gate 在 B6 插桩）。</summary>
+    /// <summary>方案 B5 直调路径（B6 引擎主入口 <c>Update</c> 的单相位拆解）：
+    /// dt=1/60 动画秒 == 1 个 tick（fps=30 × k=2 → tick 时长 1/60），
+    /// alpha=0（恰在 tick 边界采样，显示上一 tick 姿态）。</summary>
     private static void Frame(MMDPhysics ph, float[] boneWorld, float[] boneInvBind, float dt)
     {
         ph.SetKinematicTargets(boneWorld, boneInvBind, dt);
-        ph.Step(dt);
-        ph.WriteBack(boneWorld);
+        ph.Step(1);
+        ph.WriteBack(boneWorld, 0f);
     }
 
     private static void AssertFinite(string label, float[] a)
@@ -268,7 +270,7 @@ public class SyncLayerTests
         for (int k = 0; k < 4; k++) store.Orientations[4 + k] = float.NaN;
         store.Positions[3] = float.PositiveInfinity;
 
-        ph.WriteBack(bw);
+        ph.WriteBack(bw, 0f);
 
         // gate（isFinite(m[0]) && |m[0]|<1e6）丢弃 B 的更新 → 骨骼矩阵保持
         // 上一次的健康值，无 NaN 扩散。
@@ -381,8 +383,8 @@ public class SyncLayerTests
         SetBoneTranslation(bw, 0, 41f * Dt * 0.5f, 0, 0);
         SetBoneTranslation(bw, 1, 41f * Dt * 0.5f, 0, 0);
         ph.SetKinematicTargets(bw, bib, Dt);
-        ph.Step(Dt);
-        ph.WriteBack(bw);
+        ph.Step(1);
+        ph.WriteBack(bw, 0f);
 
         // store 位置精确重钉到 boneWorld1 × offset = bone 平移 + shapePos
         // （AlignPinnedBodiesToBones 是矩阵直拷，非积分值）。
@@ -430,7 +432,7 @@ public class SyncLayerTests
     /// rig 一致——M-JIGGLE-2 复用此 rig 测 authored 衰减。B 挂 identity 假骨
     /// 0：SetJiggleDamping 按骨索引匹配，无骨体匹配不到；假骨全 identity，
     /// snap/写回落回原 shapePos，对下落与地面判据零影响。</summary>
-    private static (MMDPhysics Ph, float[] BoneWorld, float[] BoneInvBind) CreateFreeFallRig()
+    internal static (MMDPhysics Ph, float[] BoneWorld, float[] BoneInvBind) CreateFreeFallRig()
     {
         List<RigidBodyDef> defs =
         [
