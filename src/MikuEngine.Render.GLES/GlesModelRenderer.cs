@@ -414,8 +414,28 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     /// <summary>
     /// 物理内核实例（宿主加载时构造并注入；null = 模型未接物理）。
     /// 刚体/关节数据来自 PmxModelData（RigidBodyDef.FromPmx / JointDef.FromPmx）。
+    /// 注入时同步做 S3 物理后付与的拓扑预计算（reze engine.ts 同构：内核
+    /// <see cref="MMDPhysics.GetPhysicsDrivenBones"/> → 模型侧闭包出物理后重算集合）。
     /// </summary>
-    public MMDPhysics? Physics { get; set; }
+    public MMDPhysics? Physics
+    {
+        get => _physics;
+        set
+        {
+            _physics = value;
+            if (value != null)
+                _model.SetPhysicsDrivenBones(value.GetPhysicsDrivenBones());
+            else
+                _model.SetPhysicsDrivenBones(Array.Empty<int>());
+        }
+    }
+    private MMDPhysics? _physics;
+
+    /// <summary>
+    /// S3 物理后付与开关（场景配置）。ON = MMD 等价：付与链在物理步后重算、消费模拟
+    /// 结果；OFF 用于 A/B 对照（付与保持读物理前的动画姿态，即未移植本功能时的行为）。
+    /// </summary>
+    public bool PostPhysicsAppendEnabled { get; set; } = true;
 
     /// <summary>S1 物理总开关（场景配置，宿主按键切换）。OFF 期间骨骼世界矩阵保持纯动画结果。</summary>
     public bool PhysicsEnabled { get; set; } = true;
@@ -478,6 +498,9 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         // 物理写回只涉及带刚体的骨骼，但全量转回 + 全量蒙皮重算是 O(骨数) 的 4x4 乘，
         // 远低于一次 IK 求解，不值得做稀疏差分。
         MMDPhysics.CopyColumnMajorToMatrices(_physBoneWorld, m.WorldMatrices);
+        // S3 物理后付与：付与链消费模拟结果。无拓扑时 O(1) 早退；受影响子集的
+        // SkinMatrices 由 RecomputeBone 内部重算，下面的全量循环覆盖物理写回的骨。
+        if (PostPhysicsAppendEnabled) m.ApplyPhysicsAppend();
         for (int i = 0; i < n; i++)
             m.SkinMatrices[i] = m.InverseBind[i] * m.WorldMatrices[i];
     }

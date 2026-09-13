@@ -26,6 +26,7 @@ using MikuEngine.Engine;
 //   E    ：轮廓线开关 | 1/2/0 ：自阴影 关/自阴影/自阴影+床影 | S ：自阴影风格循环
 //   P    ：物理模拟开关（Stage 1 S1；裙/发/胸随动效摆动，OFF 回纯动画，OFF→ON 自动 snap）
 //   G    ：地面碰撞开关（Stage 1 S2；模型空间 y=0 内置地面，默认开）
+//   H    ：物理后付与开关（Stage 1 S3；付与链消费模拟结果，OFF 回物理前姿态，A/B 对照）
 //
 // --smoke     ：无人值守自检。隐藏窗口跑 40 帧 → 强制开影模式 1 → 打印中间 RT 统计 → 退出。
 //               （跳过动画加载：自阴影/轮廓线这类多 pass 功能的"静默失效"没法靠肉眼看画面定位，
@@ -147,6 +148,11 @@ window.Load += () =>
         int dyn = rbDefs.Count(d => d.Type == RigidbodyType.Dynamic);
         int aligned = rbDefs.Count(d => d.Aligned);
         Console.WriteLine($"[Demo] 物理内核：刚体 {rbDefs.Length}（动态 {dyn} / mode2 对齐 {aligned}）| 关节 {jDefs.Length} | 内置地面（模型空间 y=0）");
+        // S3 拓扑在 Physics 注入器内预计算；这里只报规模（0 = 该模型付与链没挂物理驱动骨，S3 无感）
+        if (model.Model.HasPostPhysicsAppend)
+            Console.WriteLine($"[Demo] 物理后付与：{model.Model.PhysicsAppendBoneCount} 骨需在物理步后重算（H 键开关）");
+        else
+            Console.WriteLine("[Demo] 物理后付与：无拓扑（付与链未挂物理驱动骨，S3 不生效）");
     }
     catch (Exception ex)
     {
@@ -292,6 +298,11 @@ window.Load += () =>
                 physicsEnabled = !physicsEnabled;
                 Console.WriteLine($"[Demo] 物理模拟：{(physicsEnabled ? "开" : "关")}（S1；OFF 期间骨骼保持纯动画，OFF→ON 自动 snap 无跳变）");
             }
+            else if (key == Keys.H)
+            {
+                target.PostPhysicsAppendEnabled = !target.PostPhysicsAppendEnabled;
+                Console.WriteLine($"[Demo] 物理后付与：{(target.PostPhysicsAppendEnabled ? "开" : "关")}（S3；OFF 时付与链保持物理前的动画姿态，A/B 对照）");
+            }
             else if (key == Keys.S)
             {
                 // 循环自阴影风格：标准 → 硬边（阈值提取）→ 软影 → 标准
@@ -314,7 +325,7 @@ window.Load += () =>
 
     Console.WriteLine("[Demo] 操作: 左键=旋转 | 右键=平移 | 滚轮=缩放 | E=轮廓线 | 1/2/0=自阴影模式 | S=自阴影风格");
     Console.WriteLine("[Demo] 播放: 空格=暂停/播放 | ←/→=∓1帧 | ↑/↓=帧率±6 | F=首帧");
-    Console.WriteLine("[Demo] 物理: P=物理模拟开关 | G=地面碰撞开关（均默认开）");
+    Console.WriteLine("[Demo] 物理: P=物理模拟开关 | G=地面碰撞开关 | H=物理后付与开关（P/G 默认开）");
 
     if (smoke)
     {
@@ -674,7 +685,7 @@ static int CountDiff(byte[] a, byte[] b)
 
 static string? FindDefaultModel()
 {
-    const string Relative = "samples/MikuEngine.Demo/Model/2/2.pmx";
+    const string Relative = "samples/MikuEngine.Demo/Model/1/1.pmx";
 
     // 从输出目录往上找仓库根（bin/Debug/net10.0 → ... → 仓库根）
     var dir = new DirectoryInfo(AppContext.BaseDirectory);

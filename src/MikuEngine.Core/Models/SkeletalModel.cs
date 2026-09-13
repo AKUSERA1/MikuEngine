@@ -238,6 +238,21 @@ public sealed class SkeletalModel
     /// <summary><see cref="UpdateWorldMatricesSubtree"/> 的子树标记，复用避免每帧分配。</summary>
     private bool[] _subtreeMask = Array.Empty<bool>();
 
+    // ── 物理后付与（PostPhysicsAppend / S3）─────────────────────────────
+    //
+    // 物理写回只发布被模拟骨的【世界矩阵】，而付与求值读的是源骨的「最终局部变换」——
+    // 付与链挂在物理驱动骨上时（胸 rig：可见骨付与自 胸_回転 这类被模拟骨），不重算
+    // 的付与骨会永远穿着物理前的动画姿态。加载期由 <see cref="SetPhysicsDrivenBones"/>
+    // 预计算重算集合（reze setPhysicsDrivenBones 同构闭包）；每帧物理写回后
+    // <see cref="ApplyPhysicsAppend"/> 把模拟骨的最终局部变换从世界矩阵反解回
+    // _finalRotations/_finalTranslations 暂存，再按 deform 序只重算受影响子集。
+    //
+    // 暂存每帧由 UpdateWorldMatrices 从 Local* 全量重建 ⇒ 这里的写入无跨帧泄漏：
+    // 物理前的全量 pass 永远读到纯动画（reze 需要 override 数组 + 读路径特判，是
+    // 因为它的 localRotations 是跨帧持久状态；本项目的暂存架构不需要）。
+    private int[]? _physicsAppendOrder;
+    private int[]? _physicsAppendSources;
+
     /// <summary>
     /// 最近一次 <see cref="UpdateWorldMatrices"/> 算出的「付与之后」的最终局部旋转/平移（只读）。
     /// <see cref="IkSolverEnabled"/> 为 false 时跑一次，得到的就是「付与之后、IK 之前」的有效局部变换 ——
@@ -344,6 +359,124 @@ public sealed class SkeletalModel
             int i = DeformOrder[k];
             if (_subtreeMask[i]) RecomputeBone(i);
         }
+    }
+
+    /// <summary>
+    /// 物理后付与拓扑预计算（S3，加载期一次）。<paramref name="drivenBones"/> = 被物理
+    /// 覆写世界矩阵的骨骼（<c>MMDPhysics.GetPhysicsDrivenBones</c>：Dynamic 体绑定的骨，
+    /// mode-2 在加载层映射为 Dynamic 故天然包含）。闭包规则：付与继承自「物理驱动 ∪
+    /// 已受影响」或父骨已受影响的骨进入重算集合，物理驱动骨自身被刻意排除（它们的
+    /// 世界矩阵就是物理输出，重算会丢结果）。空拓扑时 <see cref="ApplyPhysicsAppend"/>
+    /// 为 O(1) 早退。加载期调用，分配不计入每帧路径。
+    /// </summary>
+    public void SetPhysicsDrivenBones(IReadOnlyList<int> drivenBones)
+    {
+        int n = BoneCount;
+        _physicsAppendOrder = null;
+        _physicsAppendSources = null;
+        if (n == 0 || drivenBones.Count == 0) return;
+
+        bool[] driven = new bool[n];
+        foreach (int b in drivenBones)
+            if ((uint)b < (uint)n) driven[b] = true;
+
+        // 不动点闭包：deform 序里父边与付与边都指向前方，正常数据一趟即收敛；
+        // while 循环是对非法数据（付与环）的防御，与 reze 同构。
+        bool[] affected = new bool[n];
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (int k = 0; k < DeformOrder.Length; k++)
+            {
+                int i = DeformOrder[k];
+                if (affected[i] || driven[i]) continue;
+                int src = AppendSources[i];
+                bool inherits = src >= 0 && (AppendRotate[i] || AppendMove[i]) && (driven[src] || affected[src]);
+                int parent = ParentIndices[i];
+                bool fromParent = parent >= 0 && affected[parent];
+                if (inherits || fromParent)
+                {
+                    affected[i] = true;
+                    changed = true;
+                }
+            }
+        }
+
+        List<int> order = new List<int>();
+        bool[] sourceMask = new bool[n];
+        bool hasSource = false;
+        for (int k = 0; k < DeformOrder.Length; k++)
+        {
+            int i = DeformOrder[k];
+            if (!affected[i]) continue;
+            order.Add(i);
+            int src = AppendSources[i];
+            if (src >= 0 && driven[src] && !sourceMask[src])
+            {
+                sourceMask[src] = true;
+                hasSource = true;
+            }
+        }
+        if (order.Count == 0 || !hasSource) return;
+
+        _physicsAppendOrder = order.ToArray();
+        List<int> sources = new List<int>();
+        for (int i = 0; i < n; i++)
+            if (sourceMask[i]) sources.Add(i);
+        _physicsAppendSources = sources.ToArray();
+    }
+
+    /// <summary>物理后付与拓扑是否非空（有付与链挂在物理驱动骨上）。</summary>
+    public bool HasPostPhysicsAppend => _physicsAppendOrder is not null;
+
+    /// <summary>物理后重算集合的骨数（诊断用；无拓扑时 0）。</summary>
+    public int PhysicsAppendBoneCount => _physicsAppendOrder?.Length ?? 0;
+
+    /// <summary>
+    /// 物理后付与（S3，每帧在物理写回之后调用）：把付与源（物理驱动骨）的「最终局部
+    /// 变换」从物理写回的世界矩阵反解回暂存，再按 deform 序重算受影响子集的世界/
+    /// 蒙皮矩阵。未建拓扑时 O(1) 早退。
+    ///
+    /// 反解 = 刚体换基（行主序）：world = local · parentWorld ⇒
+    ///   R_local = R_world · R_parent⁻¹，t_local = (t_world − t_parent) · R_parent⁻¹。
+    /// 父骨是否也被物理覆写均正确——读到的都是本帧最终父姿势。只写暂存数组，不碰
+    /// LocalRotations/LocalTranslations（下一帧全量重算自动重建，见类内注释）。
+    /// 旋转与平移一并恢复：付与移動（appendMove）由此正确消费模拟位移——这是 reze
+    /// 只恢复旋转所没有的。世界模式付与（bit7）直接读 WorldMatrices[src]，物理写回
+    /// 后天然是模拟结果，无需处理。
+    /// </summary>
+    public void ApplyPhysicsAppend()
+    {
+        int[]? order = _physicsAppendOrder;
+        if (order is null) return;
+        int[]? sources = _physicsAppendSources;
+        if (sources is null) return;
+        EnsureScratch();
+
+        for (int s = 0; s < sources.Length; s++)
+        {
+            int i = sources[s];
+            Matrix4x4 w = WorldMatrices[i];
+            int p = ParentIndices[i];
+            if (p >= 0)
+            {
+                Matrix4x4 pw = WorldMatrices[p];
+                // 刚体：父世界矩阵的旋转块正交，逆 = 共轭四元数（reze 的基转置同构）。
+                Quaternion parentInv = Quaternion.Conjugate(Quaternion.CreateFromRotationMatrix(pw));
+                _finalRotations[i] = Quaternion.CreateFromRotationMatrix(w) * parentInv;
+                _finalTranslations[i] = Vector3.Transform(w.Translation - pw.Translation, parentInv);
+            }
+            else
+            {
+                // 根骨：局部 = 世界（reze："With no parent the world basis already IS the local one"）。
+                _finalRotations[i] = Quaternion.CreateFromRotationMatrix(w);
+                _finalTranslations[i] = w.Translation;
+            }
+        }
+
+        for (int k = 0; k < order.Length; k++)
+            RecomputeBone(order[k]);
     }
 
     private void EnsureScratch()
