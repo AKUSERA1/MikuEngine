@@ -37,8 +37,8 @@ public sealed class WindOptions
 /// solver pass runs on all bodies — kinematic ones have invMass = 0 and
 /// act as anchors.
 /// （对照 reze physics/world.ts World 逐行移植。注意：reze 本体没有 sleeping——
-/// 所有动态体每步全量积分，本移植保持一致。碰撞检测与约束求解段（B3/B4）
-/// 在本批次为占位，插桩位置与 reze 的 step 顺序注释一一对应。）
+/// 所有动态体每步全量积分，本移植保持一致。约束求解段（B4）已接入，manifolds
+/// 由 World 自持（reze 同）。）
 /// </summary>
 public sealed class World
 {
@@ -76,6 +76,14 @@ public sealed class World
     /// take gusts identically to a live one.
     /// </summary>
     private float _windClock;
+
+    /// <summary>Per-pair contact impulse history behind warm starting。</summary>
+    private readonly ManifoldCache _manifolds = new();
+
+    // 窄签名（null contacts/constraints）调用时复用的空实例——零分配纪律：
+    // 每步新建空池/空数组会在 60fps 热路径上留垃圾。
+    private static readonly ContactPool s_emptyContacts = new();
+    private static readonly SixDofSpringConstraint[] s_emptyConstraints = Array.Empty<SixDofSpringConstraint>();
 
     public World(Vector3 gravity)
     {
@@ -125,13 +133,18 @@ public sealed class World
     }
 
     /// <summary>
-    /// B2 范围：重力/风求和 → 阻尼预测 → 积分。reze step 的第 2 步（Collide）已在
-    /// B3 接入（传入 <paramref name="contacts"/> 即启用；B2 直跑测试不传，行为不变）。
-    /// 第 3 步（Solve joint + contact constraints）在 B4 批次接入——顺序本身是
-    /// 确定性契约的一部分，不得重排。B5 时 contacts/constraints/cache/manifolds
-    /// 将按 reze step 完整签名由 MMDPhysics 传入。
+    /// B4 范围：step 3（Solve joint + contact constraints）已接入。reze step 的
+    /// 顺序（predict → collide → solve → integrate）是确定性契约的一部分，不得重排。
+    /// <paramref name="constraints"/> 非空时必须同时传 <paramref name="cache"/>
+    /// （cache 按 reze 约定由上层按 constraints 构建一次、跨步复用）；B5 起
+    /// contacts/constraints/cache 将按 reze step 完整签名由 MMDPhysics 传入。
     /// </summary>
-    public void Step(RigidBodyStore store, float dt, ContactPool? contacts = null)
+    public void Step(
+        RigidBodyStore store,
+        float dt,
+        ContactPool? contacts = null,
+        SixDofSpringConstraint[]? constraints = null,
+        SolverCache? cache = null)
     {
         if (dt <= 0) return;
 
@@ -203,11 +216,29 @@ public sealed class World
         }
 
         // 3. Solve joint + contact constraints (velocity-only).
-        // TODO(B4): if (constraints.Length > 0 || contacts.Count > 0) {
-        //               ConstraintSolver.SolveConstraints(store, constraints, cache, contacts, dt, SolverIterations, manifolds);
-        //               ConstraintSolver.ApplySplitImpulsePush(store, dt);
-        //               ConstraintSolver.SaveContactImpulses(store, contacts, manifolds);
-        //           } else { manifolds.Clear(); }
+        bool hasConstraints = constraints is { Length: > 0 };
+        if (hasConstraints && cache == null)
+        {
+            throw new ArgumentException(
+                "constraints requires a matching SolverCache (build once per constraint list, reuse across steps).",
+                nameof(cache));
+        }
+        if (hasConstraints || (contacts != null && contacts.Count > 0))
+        {
+            // B4 脚手架：reze 的 step 由 MMDPhysics 传入永远非空的 contacts/
+            // constraints/cache（可为空数组）；窄签名调用（测试）允许传 null。
+            // 归一到共享空实例后求解器端保持统一输入；cache 仅在 constraints
+            // 非空时被解引用（reze 同构），故此处为 null 安全。
+            SixDofSpringConstraint[] cons = constraints ?? s_emptyConstraints;
+            ContactPool pool = contacts ?? s_emptyContacts;
+            ConstraintSolver.SolveConstraints(store, cons, cache, pool, dt, SolverIterations, _manifolds);
+            ConstraintSolver.ApplySplitImpulsePush(store, dt);
+            ConstraintSolver.SaveContactImpulses(store, pool, _manifolds);
+        }
+        else
+        {
+            _manifolds.Clear();
+        }
 
         // 4. Penetration recovery happens in the contact velocity row (Baumgarte,
         //    CONTACT_ERP), not here. Bullet 2.75 — the build MMD's physics runs —
