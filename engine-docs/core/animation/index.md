@@ -30,8 +30,20 @@ MmdAnimation.Bind(model)       ← 绑定到具体模型（数值数组与源轨
                  MmdMorphEvaluator.Evaluate(model)   ← Group 传播 + 骨 morph 折入局部 T/R
                      │
                      ▼
-                 model.PrepareFrame(...)             ← 重算世界/蒙皮矩阵（軸制限 → 付与）
+                 MmdIkSolver.Solve(model)            ← CCD IK（迭代中含增量世界矩阵重算）
+                     │
+                     ▼
+                 model.UpdateWorldMatrices(...)      ← 軸制限 → 付与 → IK 折进世界/蒙皮矩阵
+                     │
+                     ▼
+                 MMDPhysics.Update(...)              ← 物理步进 + 姿态写回（MikuEngine.Physics）
+                     │
+                     ▼
+                 model.ApplyPhysicsAppend()          ← 物理后付与（付与链消费模拟结果）
 ```
+
+以上 IK → 物理段在渲染路径中由 `GlesModelRenderer.PrepareFrame` 统一驱动（详见
+[ik.md](ik.md)、[append-transform.md](append-transform.md) 与 [物理模块](../../physics/index.md)）。
 
 ## 设计原则
 
@@ -53,6 +65,8 @@ MmdAnimation.Bind(model)       ← 绑定到具体模型（数值数组与源轨
 | [playback.md](playback.md) | MmdAnimationPlayer · MmdPoseBuffer · MmdAnimation.Sample · MmdTimeline 时间轴 |
 | [blending.md](blending.md) | MmdAnimationLayer · MmdAnimationMixer（加权混合 / 可见性 AND） |
 | [visibility.md](visibility.md) | SkeletalModel.Visible · 表示枠阶梯采样 · 渲染三 pass 门控 |
+| [ik.md](ik.md) | MmdIkSolver（CCD）· MmdIkChain / MmdIkChainBuilder · 角度限制 / ReverseClamp |
+| [append-transform.md](append-transform.md) | 付与变换（含局部付与 / 自付与 / 物理后付与 S3） |
 | [lifecycle.md](lifecycle.md) | 绑定 / 层增删 / 清除 / GC 保证 · MmdMorphEvaluator 调用顺序 |
 
 ## 源文件
@@ -67,6 +81,9 @@ MmdAnimation.Bind(model)       ← 绑定到具体模型（数值数组与源轨
 | [MmdAnimationMixer.cs](../../../src/MikuEngine.Core/Animation/MmdAnimationMixer.cs) | 多动效混合器 |
 | [MmdTimeline.cs](../../../src/MikuEngine.Core/Animation/MmdTimeline.cs) | 多层时间轴（播放控制外壳） |
 | [MmdMorphEvaluator.cs](../../../src/MikuEngine.Core/Animation/MmdMorphEvaluator.cs) | 表情权重解算（Group 传播 / 骨 morph / 材质 morph） |
+| [MmdIkSolver.cs](../../../src/MikuEngine.Core/Animation/MmdIkSolver.cs) | MMD 风格 CCD IK 求解器 |
+| [MmdIkChain.cs](../../../src/MikuEngine.Core/Models/MmdIkChain.cs) | 运行时 IK 链 / 链节 / 固定轴 / Euler 顺序 |
+| [MmdIkChainBuilder.cs](../../../src/MikuEngine.Core/Models/MmdIkChainBuilder.cs) | PMX 骨数据 → 运行时 IK 链 |
 
 ## 与方案文档的关系
 

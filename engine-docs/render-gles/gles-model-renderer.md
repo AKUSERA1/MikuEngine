@@ -31,6 +31,8 @@ frame.LightViewProj = shadowRenderer.LightViewProj;
 
 // 帧首统一准备：重算世界/蒙皮矩阵 + 上传 UBO + 上传蒙皮 SSBO
 // 必须先于 RenderShadowMaps（它复用同一份 UBO/SSBO）
+// 内部顺序：MmdIkSolver.Solve → UpdateWorldMatrices → 物理（注入了 Physics 时：
+// MMDPhysics.Update → ApplyPhysicsAppend）→ 蒙皮/UBO/SSBO 上传
 modelRenderer.PrepareFrame(in frame);
 
 // Z pass：把模型画到光照深度图（depth-only）

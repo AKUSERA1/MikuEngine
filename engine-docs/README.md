@@ -19,8 +19,13 @@
 │  OrbitInputController（跨平台手势识别 + 灵敏度）                        │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Core 层  MikuEngine.Core                                            │
-│  OrbitCamera · MmdMath · PmxParser · SkeletalModel                    │
+│  OrbitCamera · MmdMath · PmxParser · SkeletalModel ·                  │
+│  Animation（VMD/混合/IK/付与）                                         │
 │  职责：纯数学 / 纯数据，零平台依赖                                        │
+├──────────────────────────────────────────────────────────────────────┤
+│  Physics 层  MikuEngine.Physics                                       │
+│  MMDPhysics（骨骼同步层） · World · RigidBodyStore ·                   │
+│  ContactDetection · ConstraintSolver（reze 物理逐式移植）               │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Render 层  MikuEngine.Render.GLES                                    │
 │  GlesDevice · GlesGridRenderer · GlesModelRenderer ·                  │
@@ -29,7 +34,7 @@
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-依赖方向（单向）：`Core ← Engine ← Render.GLES`，平台层引用 Engine。
+依赖方向（单向）：`Core ← Engine ← Render.GLES`，`Core ← Physics ← Render.GLES`，平台层引用 Engine。
 
 ---
 
@@ -49,8 +54,10 @@
 | [坐标系约定](core/coordinate-system.md) | 左手 / Y-up / +Z-forward / 列主序矩阵，**必读** |
 | [OrbitCamera API](core/orbit-camera.md) | 轨道相机的构造、属性、矩阵输出方法 |
 | [PMX 模型解析](core/pmx-parser.md) | PmxParser · PmxModel · SkeletalModel · SkeletalModelConverter |
-| [MMD 数学工具](core/mmd-math.md) | MmdMath：YXZ 欧拉角 ↔ 四元数转换 |
-| [动画子系统](core/animation/index.md) | VMD 加载 · 播放 · 多轨混合 · 表示枠可见性 · 生命周期 |
+| [MMD 数学工具](core/mmd-math.md) | MmdMath（YXZ 欧拉角 ↔ 四元数）· QuatMath · Mat4 |
+| [动画子系统](core/animation/index.md) | VMD 加载 · 播放 · 多轨混合 · 表示枠可见性 · CCD IK · 付与 · 生命周期 |
+| [CCD IK 求解器](core/animation/ik.md) | MmdIkSolver · MmdIkChain · 角度限制 / ReverseClamp |
+| [付与变换](core/animation/append-transform.md) | 付与（Append Transform）· 局部付与 · 物理后付与 |
 
 ### ③ Engine 模块
 
@@ -68,18 +75,25 @@
 | [GlesShadowRenderer](render-gles/gles-shadow-renderer.md) | 自阴影 Z 图 + 床影：紧视锥 / texel snapping / 多风格软影 |
 | [渲染辅助组件](render-gles/gles-support.md) | GlesTextureLibrary · GlesSkinMatricesBuffer · GlesDebugOverlay |
 
-### ⑤ 平台集成
+### ⑤ Physics 模块
+
+| 文档 | 说明 |
+|---|---|
+| [物理引擎总览](physics/index.md) | 模块结构 · 快速上手 · 帧序 · 确定性契约 |
+| [MMDPhysics 骨骼同步层](physics/mmd-physics.md) | Update 三相位 · 开关（S1/S2/S3）· Reset · 抖动阻尼 |
+| [World 与内核类型](physics/world.md) | 确定性步进 · 风 · 刚体/关节定义 · 内置地面 · 碰撞与求解 |
+
+### ⑥ 平台集成
 
 | 文档 | 说明 |
 |---|---|
 | [桌面 GLFW 集成](platform-integration/desktop-glfw.md) | 窗口创建、GLFW 鼠标回调 → Engine 层转发 |
 | [Android 集成](platform-integration/android.md) | Activity + View.OnTouchListener + EGL 上下文（伪代码骨架） |
 
-### ⑥ 未来模块
+### ⑦ 未来模块
 
 | 模块 | 状态 |
 |---|---|
-| MikuEngine.Physics | 🚧 物理引擎移植（TypeScript → C#） |
 | SDEF 球形变形 | 🚧 |
 | 共享光空间 / 多模型 | 🚧 |
 
@@ -129,6 +143,31 @@ modelRenderer.Draw(in frame, toonMode: 1f);
 // 床影（MMD 影模式 2）
 if (shadowRenderer.Enabled)
     shadowRenderer.DrawFloor(device, frame.LightColor);
+```
+
+### 流程 C：VMD 动画 + IK + 物理（完整管线）
+
+```csharp
+// 1. 加载模型并解析动画
+var modelRenderer = GlesModelRenderer.LoadFromFile(device, "model.pmx");
+var model = modelRenderer.Model;
+var anim = MmdAnimation.FromVmd(VmdParser.Parse(File.ReadAllBytes("motion.vmd")));
+var timeline = new MmdTimeline();
+timeline.AddLayer(new MmdAnimationLayer(anim));
+
+// 2. 注入物理内核（PMX 刚体/关节 → 内核定义；S2/S3 开关默认开）
+var pmx = PmxParser.Parse(File.ReadAllBytes("model.pmx"));
+modelRenderer.Physics = new MMDPhysics(
+    pmx.RigidBodies.Select(RigidBodyDef.FromPmx).ToArray(),
+    pmx.Joints.Select(JointDef.FromPmx).ToArray());
+
+// 3. 每帧：
+timeline.Apply(model);                                  // 采样 + 混合写回
+MmdMorphEvaluator.Evaluate(model);                      // 表情求值
+modelRenderer.PhysicsFrame = timeline.CurrentFrame;     // 物理 tick 时钟随动画帧号
+modelRenderer.PrepareFrame(in frame);                   // 内部依次：IK → 世界矩阵 →
+                                                        // 物理写回 → 物理后付与 → 蒙皮/上传
+modelRenderer.Draw(in frame);
 ```
 
 详细用法见各子文档。

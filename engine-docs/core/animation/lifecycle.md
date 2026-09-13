@@ -67,7 +67,7 @@ timeline.ClearLayers();   // 混合器内的层列表清空
 ```csharp
 anim.Sample(model, frame);          // ① 复位骨骼 + 写骨轨道；② 复位并写 MorphRawWeights
 MmdMorphEvaluator.Evaluate(model);  // ③ Group 传播 → MorphWeights；④ 骨 morph 写入局部 T/R
-model.PrepareFrame(in frame);       // ⑤ UpdateWorldMatrices（軸制限 → 付与）
+model.PrepareFrame(in frame);       // ⑤ IK → UpdateWorldMatrices（軸制限 → 付与）→ 物理 → 蒙皮
 ```
 
 `Evaluate` 分三步（**幂等**：有效权重每次从原始值整体重算）：
