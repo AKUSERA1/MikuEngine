@@ -125,12 +125,13 @@ public sealed class World
     }
 
     /// <summary>
-    /// B2 范围：重力/风求和 → 阻尼预测 → 积分。reze step 的第 2 步（Collide）与
-    /// 第 3 步（Solve joint + contact constraints）分别在 B3（ContactDetection）
-    /// 与 B4（ConstraintSolver）批次接入，插桩点见 TODO 注释——顺序本身是
-    /// 确定性契约的一部分，不得重排。
+    /// B2 范围：重力/风求和 → 阻尼预测 → 积分。reze step 的第 2 步（Collide）已在
+    /// B3 接入（传入 <paramref name="contacts"/> 即启用；B2 直跑测试不传，行为不变）。
+    /// 第 3 步（Solve joint + contact constraints）在 B4 批次接入——顺序本身是
+    /// 确定性契约的一部分，不得重排。B5 时 contacts/constraints/cache/manifolds
+    /// 将按 reze step 完整签名由 MMDPhysics 传入。
     /// </summary>
-    public void Step(RigidBodyStore store, float dt)
+    public void Step(RigidBodyStore store, float dt, ContactPool? contacts = null)
     {
         if (dt <= 0) return;
 
@@ -195,8 +196,11 @@ public sealed class World
         }
 
         // 2. Collide.
-        // TODO(B3): contacts.Reset(); ContactDetection.FindContacts(store, contacts);
-        //           （含 groundIndex >= 0 时的专用地面平面 pass）
+        if (contacts != null)
+        {
+            contacts.Reset();
+            ContactDetection.FindContacts(store, contacts);
+        }
 
         // 3. Solve joint + contact constraints (velocity-only).
         // TODO(B4): if (constraints.Length > 0 || contacts.Count > 0) {
