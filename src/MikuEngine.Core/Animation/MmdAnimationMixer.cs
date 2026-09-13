@@ -8,7 +8,7 @@ namespace MikuEngine.Core.Animation;
 ///
 /// 每帧对时间轴帧号做一次 <see cref="Evaluate"/>：
 /// <list type="number">
-///   <item>收集活跃层（<see cref="MmdAnimationLayer.IsActive"/>：Weight &gt; 0 且落在活跃区间内）；</item>
+///   <item>收集活跃层（<see cref="MmdAnimationLayer.IsActive"/>：Weight > 0 且落在活跃区间内）；</item>
 ///   <item>逐层 <see cref="MmdAnimation.SampleInto"/> 到<b>共享 scratch</b>（所有层复用同一实例）；</item>
 ///   <item>逐项「覆盖权重和」归一 + 残差混回绑定姿势；</item>
 ///   <item>可见性：逐活跃层取阶梯布尔，AND 合并写回 <see cref="SkeletalModel.Visible"/>；</item>
@@ -19,7 +19,7 @@ namespace MikuEngine.Core.Animation;
 /// 残差按<b>覆盖该项的权重和</b>混回绑定（不是全局权重）；可见性<b>不</b>做数值加权
 /// （规避 babylon-mmd 的 0.5 半透明 bug），布尔 AND。
 ///
-/// 权重归一用<b>逐项</b>归一 —— 仅当同一骨 / morph 上的覆盖权重和 W(item) &gt; 1
+/// 权重归一用<b>逐项</b>归一 —— 仅当同一骨 / morph 上的覆盖权重和 W(item) > 1
 /// 时才除以 W(item)。层间竞争（多个层驱动同一项）时与 babylon / reze 的全局归一严格等价
 /// （那正是两家的设计场景：同一条动画的重叠 span）；而 MMD 的「モーション槽 + 表情槽」各层
 /// 轨道互不重叠，全局归一会把四层各压到 1/4 强度 —— 与 MMD 的并集行为相悖。

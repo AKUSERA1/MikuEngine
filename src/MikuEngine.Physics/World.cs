@@ -36,9 +36,6 @@ public sealed class WindOptions
 /// integrate; the parent class syncs them from bones around the step. The
 /// solver pass runs on all bodies — kinematic ones have invMass = 0 and
 /// act as anchors.
-/// （对照 reze physics/world.ts World 逐行移植。注意：reze 本体没有 sleeping——
-/// 所有动态体每步全量积分，本移植保持一致。约束求解段（B4）已接入，manifolds
-/// 由 World 自持（reze 同）。）
 /// </summary>
 public sealed class World
 {
@@ -133,8 +130,6 @@ public sealed class World
     }
 
     /// <summary>
-    /// B4 范围：step 3（Solve joint + contact constraints）已接入。reze step 的
-    /// 顺序（predict → collide → solve → integrate）是确定性契约的一部分，不得重排。
     /// <paramref name="constraints"/> 非空时必须同时传 <paramref name="cache"/>
     /// （cache 按 reze 约定由上层按 constraints 构建一次、跨步复用）；B5 起
     /// contacts/constraints/cache 将按 reze step 完整签名由 MMDPhysics 传入。
@@ -225,8 +220,8 @@ public sealed class World
         }
         if (hasConstraints || (contacts != null && contacts.Count > 0))
         {
-            // B4 脚手架：reze 的 step 由 MMDPhysics 传入永远非空的 contacts/
-            // constraints/cache（可为空数组）；窄签名调用（测试）允许传 null。
+            // step 由 MMDPhysics 传入永远非空的 contacts/constraints/cache（可为空数组）；
+            // 窄签名调用（测试）允许传 null。
             // 归一到共享空实例后求解器端保持统一输入；cache 仅在 constraints
             // 非空时被解引用（reze 同构），故此处为 null 安全。
             SixDofSpringConstraint[] cons = constraints ?? s_emptyConstraints;

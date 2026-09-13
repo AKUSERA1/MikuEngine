@@ -409,12 +409,10 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         _device.UpdateUbo(_frameUbo, ref uniforms);
     }
 
-    // ── Stage 1 S1 物理段（MMDPhysics 集成，方案 B6）────────────────────────
-
     /// <summary>
     /// 物理内核实例（宿主加载时构造并注入；null = 模型未接物理）。
     /// 刚体/关节数据来自 PmxModelData（RigidBodyDef.FromPmx / JointDef.FromPmx）。
-    /// 注入时同步做 S3 物理后付与的拓扑预计算（reze engine.ts 同构：内核
+    /// 注入时同步做物理后付与的拓扑预计算（内核
     /// <see cref="MMDPhysics.GetPhysicsDrivenBones"/> → 模型侧闭包出物理后重算集合）。
     /// </summary>
     public MMDPhysics? Physics
@@ -432,18 +430,16 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     private MMDPhysics? _physics;
 
     /// <summary>
-    /// S3 物理后付与开关（场景配置）。ON = MMD 等价：付与链在物理步后重算、消费模拟
-    /// 结果；OFF 用于 A/B 对照（付与保持读物理前的动画姿态，即未移植本功能时的行为）。
+    /// 物理后付与开关（场景配置）。ON = MMD 等价：付与链在物理步后重算、消费模拟。
     /// </summary>
     public bool PostPhysicsAppendEnabled { get; set; } = true;
 
-    /// <summary>S1 物理总开关（场景配置，宿主按键切换）。OFF 期间骨骼世界矩阵保持纯动画结果。</summary>
+    /// <summary>物理总开关（场景配置）。OFF 期间骨骼世界矩阵保持纯动画结果。</summary>
     public bool PhysicsEnabled { get; set; } = true;
 
     /// <summary>
-    /// S2 地面碰撞开关（场景配置，宿主按键切换）。默认 ON（MMD 本体默认有地面）。
-    /// 内置地面 = 内核构造时追加的无骨骼 static box，顶面 = 模型空间 y=0——地面跟随
-    /// 模型原点（角色被举起时她的地面跟着走），发梢/裙摆落在"她自己的脚下"。
+    /// 地面碰撞开关（场景配置）。默认 ON（MMD 本体默认有地面）。
+    /// 内置地面 = 内核构造时追加的无骨骼 static box，顶面 = 模型空间 y=0。
     /// SetFloor 只翻转 store.GroundIndex 开关位：体常驻、不扰动求解器缓存的任何索引，
     /// 任意 tick 边界热切安全，无需 reset。
     /// </summary>
@@ -473,7 +469,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
 
     /// <summary>
     /// 一渲染帧的物理段：骨骼世界矩阵转列主序 → 内核 <see cref="MMDPhysics.Update"/>
-    /// （S1 gate + tick 时钟 + 三相位）→ 写回行主序 WorldMatrices → 重算蒙皮矩阵。
+    /// → 写回行主序 WorldMatrices → 重算蒙皮矩阵。
     /// 逆绑定矩阵是常量，列主序副本只转一次。
     /// </summary>
     private void RunPhysics()
@@ -498,7 +494,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         // 物理写回只涉及带刚体的骨骼，但全量转回 + 全量蒙皮重算是 O(骨数) 的 4x4 乘，
         // 远低于一次 IK 求解，不值得做稀疏差分。
         MMDPhysics.CopyColumnMajorToMatrices(_physBoneWorld, m.WorldMatrices);
-        // S3 物理后付与：付与链消费模拟结果。无拓扑时 O(1) 早退；受影响子集的
+        // 物理后付与：付与链消费模拟结果。无拓扑时 O(1) 早退；受影响子集的
         // SkinMatrices 由 RecomputeBone 内部重算，下面的全量循环覆盖物理写回的骨。
         if (PostPhysicsAppendEnabled) m.ApplyPhysicsAppend();
         for (int i = 0; i < n; i++)
@@ -526,7 +522,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         MmdIkSolver.Solve(_model);
 
         _model.UpdateWorldMatrices();
-        // Stage 1 S1 物理段（方案 B6 每帧序）：FK/IK/付与 → 物理（SetKinematicTargets →
+        // FK/IK/付与 → 物理（SetKinematicTargets →
         // Step → WriteBack）。物理驱动骨的世界矩阵被改写后立即重算蒙皮，影图 pass 与
         // 主渲染读到的都是本帧物理后的姿态。
         if (Physics != null) RunPhysics();
@@ -586,15 +582,14 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         gl.Uniform1(_locShadowEdge, ShadowEdge);
         gl.Uniform1(_locNormalOffset, ShadowNormalOffset);
 
-        // 注意：ShadowZTexture == 0 时必须显式解绑：GL 纹理绑定是粘滞状态，
-        //    "跳过 bind"摘不掉上一帧的绑定（踩过，会得到 A/B 校验和相同的假结果）。
+        // 注意：ShadowZTexture == 0 时必须显式解绑：GL 纹理绑定是粘滞状态，"跳过 bind"摘不掉上一帧的绑定。
         gl.ActiveTexture(TextureUnit.Texture3);
         gl.BindTexture(TextureTarget.Texture2D, ShadowZTexture);
         gl.ActiveTexture(TextureUnit.Texture0);
 
         // ── 单一队列、按 PMX 材质顺序（对齐 PmxEditor，2026-09-10 修订）────────
-        // 反编译结论：fxd 只有 tec_model 一个 technique、单一 pass，且恒开
-        //   AlphaBlendEnable=True / SrcBlend=SRCALPHA / DestBlend=INVSRCALPHA
+        // 结论：PE的 fxd 只有 tec_model 一个 technique、单一 pass，且恒开
+        // AlphaBlendEnable=True / SrcBlend=SRCALPHA / DestBlend=INVSRCALPHA
         // fxd 与 C# 都**没有** ZWriteEnable / AlphaTestEnable —— D3D9 的
         // ZWRITEENABLE 默认 TRUE，即 PE 对半透明材质也写深度、按材质顺序画、不排序。
         //
@@ -664,10 +659,9 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     ///
     /// 要点：
     ///  1. 主渲染全部画完之后再画 —— edge 外扩壳与本体共享深度，后画才能被正确遮挡
-    ///  2. 只画 (flag & EnabledToonEdge) != 0 且 EdgeSize &gt; 0 的材质（本模型 42 个里 23 个）
+    ///  2. 只画 (flag & EnabledToonEdge) != 0 且 EdgeSize > 0 的材质
     ///  3. 复用同一个 VAO：edge VS 用的 attribute 槽位与主 VS 完全一致
-    ///  4. 剔除状态与主渲染同规则（逐材质按双面 flag）；blend 恒开，
-    ///    因此 EdgeColor.w &lt; 1 的边缘是半透明的（本模型脸/肌/足 = 0.60）
+    ///  4. 剔除状态与主渲染同规则（逐材质按双面 flag）；blend 恒开，因此 EdgeColor.w < 1 的边缘是半透明的
     /// </summary>
     private void DrawEdges()
     {
@@ -715,21 +709,6 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     ///   1. blend 恒开 SRC_ALPHA/INV_SRC_ALPHA（a=1 时是恒等混合，对不透明零副作用）
     ///   2. 深度写恒开、无 alpha test
     ///   3. <b>默认剔除背面</b>；材质带 PMX 両面（IsDoubleSided）flag 时关闭剔除
-    ///
-    /// 剔除这块的反编译证据（PmxEditorCore L25914-25934）：
-    /// <code>
-    ///   Cull renderState3 = d.GetRenderState&lt;Cull&gt;((RenderState)22);   // 保存
-    ///   for (int i = 0; i &lt; num; i++) {                                 // 逐材质
-    ///       if (m_both[i]) d.SetRenderState&lt;Cull&gt;((RenderState)22, (Cull)1);  // D3DCULL_NONE
-    ///       ef.BeginPass(0); d.DrawIndexedPrimitives(...); ef.EndPass();
-    ///       if (m_both[i]) d.SetRenderState&lt;Cull&gt;((RenderState)22, renderState3);  // 恢复
-    ///   }
-    /// </code>
-    /// 即：PE 默认用 D3D9 设备默认值 D3DCULL_CCW（正面为顺时针、剔除背面），
-    /// 仅当材质标了両面才临时切成 D3DCULL_NONE，画完立即恢复。
-    ///
-    /// 之前"恒不剔除"是错的：单面材质（本模型的 衣+/外套+/袖+/肌+，flag=0x1e）
-    /// 的背光内表面会被画出来 —— 它们法线背光 → ly=0 → 只剩环境色，叠在正面材质上就偏暗。
     /// </summary>
     private static void ApplyRenderState(GL gl, bool doubleSided)
     {

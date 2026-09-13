@@ -8,24 +8,20 @@ public readonly record struct IkChainSolveResult(bool Solved, int IterationsUsed
 
 /// <summary>
 /// MMD 风格 CCD IK 求解器 —— 逐式移植 PmxEditor 的 <c>IKTransform</c>
-/// （<c>reference/PmxEditor/decompiled/PmxEditorLib/PmxEditorLib.decompiled.cs:74675-75010</c>）。
 ///
-/// 移植纪律（见 docs/2026-09-12-mmd-ik-design.md §10 / 附录 D）：
 /// <list type="bullet">
-/// <item>公式<b>逐行照抄</b>，不做"等价改写"；行号在注释里，便于回查。</item>
 /// <item>坐标系与乘序：本引擎 = 左手 Z-forward + <b>行向量</b>（<c>v * M</c>），与 PmxEditor 的
 /// SlimDX/D3D9 <b>同族</b> ⇒ 交叉积顺序、四元数乘序、<c>M11..M44</c> 元素索引都可直接沿用。</item>
 /// <item>**角色语义**：目标（带 IK 标志的骨）<b>冻结</b>，被驱动端（PMX <c>Ik.Target</c>）<b>每步刷新</b>。
 /// 这一条搞反会直接表现为"脚永远到不了地面"。</item>
 /// <item>**链序**：<c>Links</c> 保持 PMX 文件顺序 = 末端侧 → 根；<c>LimitAngle * (index + 1)</c>
-/// 因此让越靠根的骨获得越大预算（大腿 &gt; 小腿），与解剖直觉一致。</item>
+/// 因此让越靠根的骨获得越大预算（大腿 > 小腿），与解剖直觉一致。</item>
 /// <item>无跨帧状态：每次 <see cref="Solve"/> 先整体复位 <c>IkRotations</c>
 /// （PmxEditor <c>InitializeAngle()</c>），保证"连续播放到帧 N ≡ 直接 seek 到帧 N"。</item>
 /// </list>
 ///
-/// 未实现（记录在案）：PMX 的足 IK 在 MMD 本体走私有解析式；本实现与 PmxEditor 一致，
-/// <b>把足 IK 当普通 CCD 链解</b>，不做按骨名特判。MMD 本体的通用 CCD 私有公式
-/// （<c>0.5·asin(本轴投影)</c>、FK 播种、膝骨名特判）也未实现 —— 均为后续可选项。
+/// 未实现：PMX 的足 IK 在 MMD 本体走私有解析式IK；本实现与 PmxEditor 一致，
+/// <b>把足 IK 当普通 CCD 链解</b>，不做按骨名特判。
 /// </summary>
 public static class MmdIkSolver
 {
@@ -37,7 +33,7 @@ public static class MmdIkSolver
 
     /// <summary>
     /// Euler 分解的奇异值钳位 <c>1.535889</c> rad（±88°）。PmxEditor 与 MMD 本体
-    /// （<c>0x530F40/0x530F44</c>）同值 —— "接近垂直时锁轴避免 gimbal 翻转"。
+    /// 同值 —— "接近垂直时锁轴避免 gimbal 翻转"。
     /// </summary>
     private const float SingularClamp = 1.535889f;
 
@@ -47,17 +43,16 @@ public static class MmdIkSolver
 
     /// <summary>
     /// 诊断开关（环境变量 <c>MIKU_IK_NO_LIMIT=1</c>）：忽略全部角度限制与固定轴量化。
-    /// 用途是把"轴 / 每轮转角公式"与"Euler 限位路径"两类差异二分定位
-    /// （对拍 reze 时同步用 <c>IK_NO_LIMIT=1</c>）。默认关闭。
+    /// 用途是把"轴 / 每轮转角公式"与"Euler 限位路径"两类差异二分定位。默认关闭。
     /// </summary>
     public static readonly bool IgnoreLimitations =
         System.Environment.GetEnvironmentVariable("MIKU_IK_NO_LIMIT") == "1";
 
-    // ── F3（设计文档附录 F）：angleDot<0 反向钳 ────────────────────────────
+    // ── angleDot<0 反向钳 ────────────────────────────
     // 目标落在反向半球（toTarget·toIk < 0）时，acos 给出 90°~180° 的巨大单步转角，
     // CCD 会试图一步把腿甩过去（"腿被吸走/翻转"）。MMD 解析式从不提议越界转角，
     // 该钳把反向一步封顶到 LimitAngle（去掉 (linkIndex+1) 的逐级放大）。
-    // 来源：修改版 CCDIKSolver.js 独有改动 #7；env: MIKU_IK_NO_REVERSE_CLAMP=1 关闭（A/B 对照）。
+    // env: MIKU_IK_NO_REVERSE_CLAMP=1 关闭（A/B 对照）。
     public static readonly bool ReverseClamp =
         System.Environment.GetEnvironmentVariable("MIKU_IK_NO_REVERSE_CLAMP") != "1";
 
@@ -86,7 +81,7 @@ public static class MmdIkSolver
         model.UpdateWorldMatrices();
 
         // 注意：不要写成 `results?.Add(SolveChain(...))` —— 空条件运算符在 results 为 null 时
-        // **连实参都不求值**，会把整个求解过程静默跳掉（渲染路径不传 results，症状是"IK 完全没效果"）。
+        // **连实参都不求值**，会把整个求解过程静默跳掉。
         for (int c = 0; c < model.IkChains.Length; c++)
         {
             var result = SolveChain(model, model.IkChains[c], c);
@@ -213,7 +208,7 @@ public static class MmdIkSolver
 
         if (axis.LengthSquared() < AxisEpsilonSq) return;
 
-        // F3 反向钳：目标在反向半球时封顶到 LimitAngle（去掉逐级放大）。
+        // 反向钳：目标在反向半球时封顶到 LimitAngle（去掉逐级放大）。
         // 注意必须在 clamp 前取原始 dot 判断半球；正常半球保持 PE 的 (linkIndex+1) 预算不变。
         float angleDot = Vector3.Dot(toTarget, toIk);
         float dot = System.Math.Clamp(angleDot, -1f, 1f);

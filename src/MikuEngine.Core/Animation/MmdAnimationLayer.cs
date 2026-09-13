@@ -74,7 +74,7 @@ public sealed class MmdAnimationLayer
     ///   <item>活跃区间<b>之后</b>仅当 <see cref="Loop"/> 回卷时继续贡献。</item>
     /// </list>
     ///
-    /// 判定只看「<c>Weight &gt; 0</c> 且落在区间内」，<b>与淡入淡出包络无关</b>：淡入首帧的包络为 0，
+    /// 判定只看「<c>Weight > 0</c> 且落在区间内」，<b>与淡入淡出包络无关</b>：淡入首帧的包络为 0，
     /// 但该层仍算活跃（可见性投票不受 fade 影响 —— 表示枠是布尔量，不参与数值混合）。
     /// </summary>
     public bool IsActive(double timelineFrame)

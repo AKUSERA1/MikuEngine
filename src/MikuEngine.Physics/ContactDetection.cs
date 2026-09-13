@@ -2,7 +2,6 @@ namespace MikuEngine.Physics;
 
 /// <summary>
 /// Narrowphase contact generation for sphere/box/capsule pairs.
-/// （对照 reze physics/contact.ts L144-1488 逐行移植；reze 原行为注释保留）
 ///
 /// Contact convention: normal points from body A toward body B, so a positive
 /// normal impulse pushes B away from A. rA / rB are world-space lever arms from
@@ -11,8 +10,6 @@ namespace MikuEngine.Physics;
 /// (see DetectBoxBox) — MMD dress rigs are built from box panels, and it is the
 /// majority of collidable pairs on those models.
 ///
-/// 零分配纪律：所有 scratch 缓冲为模块级 static（单线程假设与 reze 的
-/// module-level Float32Array 一致）；接触点经 <see cref="ContactPool"/> 复用。
 /// </summary>
 public static class ContactDetection
 {
@@ -37,7 +34,7 @@ public static class ContactDetection
     // would flicker between them frame to frame and the panel would rock.
     private const float EdgeAxisBias = 1.05f;
 
-    // --- Module-level scratch（单线程假设与 reze 一致；互不踩踏已按 reze 布局分开） ---
+    // --- Module-level scratch ---
     private static readonly float[] CapPoint = new float[3];
     private static readonly float[] CapPointB = new float[3];
     private static readonly float[] CpA = new float[3];
@@ -601,7 +598,7 @@ public static class ContactDetection
         float bestRBX = 0, bestRBY = 0, bestRBZ = 0;
         bool found = false;
 
-        // samples = [t, 0, 1]（顺序保持 reze：同深度先到先得）
+        // samples = [t, 0, 1]（同深度先到先得）
         for (int si = 0; si < 3; si++)
         {
             float s = si == 0 ? t : si == 1 ? 0f : 1f;

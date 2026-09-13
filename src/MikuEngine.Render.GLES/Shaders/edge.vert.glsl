@@ -2,7 +2,7 @@
 
 // MikuEngine GLES 3.1 —— PMX 轮廓线（Edge / Outline）顶点着色器
 //
-// 严格照抄 PmxEditor 的 VS1_Edge（fxd_decoded.txt L589-609）：
+// 移植自 PmxEditor 的 VS1_Edge（fxd_decoded.txt L589-609）：
 //   WeightVertexOut wv = WeightVertex(v_in);            // 蒙皮（BDEF 分支里已 normalize）
 //   float h = ((v_in.UV.z * EdgeValue) * OffsetMul_EdgeSize + OffsetAdd_EdgeSize) * BaseEdgeValue;
 //   float d = distance(CameraPosition, wv.Position) * BaseDistanceInv;
@@ -15,8 +15,7 @@
 // 常量（fxd L29-31）：EdgeValue=1.0、BaseEdgeValue=0.015、BaseDistanceInv=0.1
 //
 // 与 PE 的一处刻意差异：PE 的 EdgeValue 是**模型级**全局值（编辑器 UI「サイズ」，
-// PmxModel.EdgeValue），而 PMX 里 EdgeSize 本是**逐材质**的。本模型实测三档
-// 若要逐像素对齐 PE 的某个截图，把 uMaterialEdgeSize 换成统一的全局值即可。
+// PmxModel.EdgeValue），而 PMX 里 EdgeSize 本是**逐材质**的。
 
 precision highp float;
 precision highp int;

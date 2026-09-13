@@ -1,5 +1,4 @@
 // Persistent contact manifolds — the cache that makes warm starting possible.
-// （对照 reze physics/manifold.ts 逐行移植）
 //
 // Bullet 2.75 keeps a btPersistentManifold per body pair holding up to 4 points,
 // each carrying the impulse it converged to last step. At setup the solver seeds

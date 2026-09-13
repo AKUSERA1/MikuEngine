@@ -7,7 +7,7 @@ namespace MikuEngine.Physics;
 /// SoA storage for all rigid bodies. Per-body state, constants, bone-coupling
 /// matrices, and a per-step AABB.（对照 reze physics/body.ts RigidBodyStore 逐行移植）
 ///
-/// 零分配纪律：构造之后每帧路径（UpdateInvInertiaWorld / UpdateAabbs /
+/// 零分配：构造之后每帧路径（UpdateInvInertiaWorld / UpdateAabbs /
 /// ComputeBoneOffsets）不分配；<see cref="GetCollisionPairs"/> 惰性构建一次后缓存
 /// （reze 同）。scratch 缓冲为模块级 static（单线程假设与 reze 一致）。
 /// </summary>
@@ -67,7 +67,7 @@ public sealed class RigidBodyStore
     /// <summary>
     /// Index of the built-in floor body (see MMDPhysics constructor), -1 if none.
     /// Excluded from the pair list; findContacts gives it a dedicated plane pass.
-    /// 这是 setFloor 开关位（S2 的 P1 接出点），Stage 1 保留字段不接出 API。
+    /// 这是 setFloor 开关位
     /// </summary>
     public int GroundIndex = -1;
 
@@ -312,7 +312,7 @@ public sealed class RigidBodyStore
         float[] invMass = InvMass;
         ushort[] group = CollisionGroup;
         ushort[] mask = WillCollideMask;
-        // ushort 索引对（体数 &lt; 65536，MMD 模型刚体量级 ~ 数百）
+        // ushort 索引对（体数 < 65536，MMD 模型刚体量级 ~ 数百）
         List<ushort> buf = new();
         for (int i = 0; i < n; i++)
         {

@@ -90,8 +90,7 @@ public static class SkeletalModelConverter
             model.BoneNames[i] = b.Name;
             model.ParentIndices[i] = b.ParentBoneIndex;
 
-            // PMX 的 Bone.Position 是【模型空间绝对坐标】，局部平移必须取相对父骨的差值
-            // （PMX 规范；reze pmx-loader.ts 的 bindTranslation = pos - parentPos 同此）。
+            // PMX 的 Bone.Position 是【模型空间绝对坐标】，局部平移必须取相对父骨的差值。
             // 绑定姿势下 Skin ≡ 单位阵，绝对/相对两种取值渲染结果都一样，所以静态预览无感；
             // 但 FK 动画的旋转支点取决于局部偏移 —— 用绝对值会让每根骨绕错误支点旋转
             //（表现：上半身/脖子撕裂成放射状薄片、头部错位）。
@@ -106,8 +105,7 @@ public static class SkeletalModelConverter
 
             // 付与（append transform）：源骨必须存在；比率钳到 [-1, 1]（PMX 允许负值，
             // -1 表示反向抵消）。PMX 只在 HasAppendRotate / HasAppendMove 之一置位时才算付与。
-            // 自付与（付与源 = 自己，真实模型里存在，如石英式的玩具骨）按 MMD 语义视为
-            // no-op —— MMD 在烘焙验证中对该情形输出 identity（baked.vmd 实测）。
+            // 自付与（付与源 = 自己，真实模型里存在）按 MMD 语义视为no-op。
             model.AppendSources[i] = -1;
             if (b.AppendTransform is { } a && (uint)a.ParentIndex < (uint)n && a.ParentIndex != i)
             {

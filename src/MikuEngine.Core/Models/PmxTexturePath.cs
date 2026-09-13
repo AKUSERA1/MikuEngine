@@ -5,7 +5,7 @@ namespace MikuEngine.Core.Models;
 /// <summary>
 /// PMX 纹理路径处理工具。
 /// PMX 模型常由不同制作者/工具生成，纹理路径里可能混用 '/' 与 '\' 分隔符
-/// （例如 "texture/cloth/01.png" "texture\\cloth\01.png"），直接作为文件路径解析会失败。这里统一归一化。
+/// （例如 "texture/cloth/01.png" "texture\cloth\01.png"），直接作为文件路径解析会失败。这里统一归一化。
 /// </summary>
 public static class PmxTexturePath
 {

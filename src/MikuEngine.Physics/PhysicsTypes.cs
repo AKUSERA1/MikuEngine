@@ -14,8 +14,7 @@ public enum RigidbodyShape : byte
 /// <summary>
 /// 刚体类型。对照 reze physics/types.ts RigidbodyType。
 /// 注意：PMX mode 2 是 DYNAMIC（加载层映射为 Dynamic + Aligned=true），不要把
-/// PMX 原始字节 1:1 映射到本枚举——那会冻住 mode-2 刚体（大多数现代裙装 rig
-/// 与所有 胸_回転 胸部刚体）。
+/// PMX 原始字节 1:1 映射到本枚举——那会冻住 mode-2 刚体。
 /// </summary>
 public enum RigidbodyType : byte
 {
@@ -62,9 +61,9 @@ public sealed class RigidBodyDef
     /// </summary>
     public bool Aligned { get; init; }
 
+    //TODO: 共享物理世界
     /// <summary>
-    /// S5 预留字段位：多模型共享 world 时的模型组 id。Stage 1 单 world 单模型，
-    /// 不启用（per-model 内核实例，见方案 §3）。
+    /// 预留字段位：多模型共享 world 时的模型组 id。当前单 world 单模型，不启用。
     /// </summary>
     public int ModelGroupId { get; init; }
 
@@ -113,8 +112,7 @@ public sealed class RigidBodyDef
     /// 她的地面跟着她走。
     /// </summary>
     /// <remarks>
-    /// 内核构造（B5 的 MMDPhysics）负责把该 def 追加到列表末尾、置零其组掩码
-    /// （脱离通用 pair 列表）并把 store.GroundIndex 指向它。
+    /// 内核构造负责把该 def 追加到列表末尾、置零其组掩码并把 store.GroundIndex 指向它。
     /// </remarks>
     public static RigidBodyDef CreateGround()
     {
@@ -139,7 +137,8 @@ public sealed class RigidBodyDef
     }
 }
 
-/// <summary>内核关节定义，对照 reze physics/types.ts Joint。通常参数用于构建 6DOF 弹簧约束（B4）。</summary>
+/// <summary>内核关节定义，对照 reze physics/types.ts Joint。
+/// </summary>
 public sealed class JointDef
 {
     public required string Name { get; init; }

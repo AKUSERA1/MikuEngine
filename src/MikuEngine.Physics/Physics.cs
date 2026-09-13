@@ -3,28 +3,29 @@ using MikuEngine.Core.Math;
 namespace MikuEngine.Physics;
 
 /// <summary>
+/// 
+/// 物理引擎，移植自 reze-engine 的 TypeScript 实现。类名 MMDPhysics 与 reze 原实现区分
+/// 
 /// Skeleton sync layer：kinematic 目标、snap、teleport carry、写回、reset、
-/// 地面开关、NaN gate、alpha 插值。类名 MMDPhysics 与 reze 原实现区分
-/// （对照 reze physics/physics.ts RezePhysics L17-856 逐行移植，reze 注释里的
-/// 行为决策原样保留）。
+/// 地面开关、NaN gate、alpha 插值。
 ///
 /// Static / kinematic bodies follow their bone via boneWorld × bodyOffset;
 /// dynamic bodies integrate under gravity + constraints and write their pose
 /// back via bodyWorld × bodyOffsetInverse.
 ///
 /// reze 把这些塞在一个 step(dt, bones, binds) 里；C# 侧拆成与渲染帧序对应的
-/// 三个相位，由 <see cref="Update"/>（B6 引擎主入口）串起：
-///   FK/IK/付与 → <see cref="Update"/>（= SetKinematicTargets → Step(ticks) → WriteBack）
-/// 时钟（B6）：tickTarget = floor(动画帧号 × k)，k=<see cref="TickRateMultiplier"/>，
-/// 每 tick 固定 <see cref="TickDuration"/> 秒；物理状态是帧号的纯函数，与渲染率/
-/// 时钟模式解耦（DET-1/DET-2 的确定性契约）。
+/// 三个相位，由 <see cref="Update"/>串起：
+/// FK/IK/付与 → <see cref="Update"/>（= SetKinematicTargets → Step(ticks) → WriteBack）
+/// 
+/// 时钟：tickTarget = floor(动画帧号 × k)，k=<see cref="TickRateMultiplier"/>，
+/// 每 tick 固定 <see cref="TickDuration"/> 秒；物理状态是帧号的纯函数，与渲染率/时钟模式解耦。
+/// 
 /// dt 语义：**动画秒**（帧号差 × 1/PlaybackFps），不是 wall dt——teleport 阈值
-/// "250 units/s 按帧时间缩放"在 FrameLocked/RealTime 两种时钟下都必须以帧号域
-/// 换算后的 dt 计，否则阈值失真（方案 §6.4）。
+/// "250 units/s 按帧时间缩放"在 FrameLocked/RealTime 两种时钟下都必须以帧号域换算后的 dt 计，否则阈值失真。
 /// </summary>
 public sealed class MMDPhysics
 {
-    // Module-level scratch（reze 同：零分配纪律，单线程假设）。
+    // Module-level scratch
     private static readonly float[] BodyMat = new float[16];
     private static readonly float[] BoneMat = new float[16];
     private static readonly float[] ScratchQuat = new float[4];
@@ -54,7 +55,7 @@ public sealed class MMDPhysics
     private float _playbackFps = 30f;
 
     /// <summary>
-    /// B6 tick 时钟倍率 k（方案 §4-B6：每动画帧 k 个物理 tick，固定 2 = Standard 档，
+    /// tick 时钟倍率 k（每动画帧 k 个物理 tick，固定 2 = Standard 档，
     /// 无 UI 档位）。tickTarget = floor(动画帧号 × k)。
     /// </summary>
     public const int TickRateMultiplier = 2;
@@ -64,15 +65,14 @@ public sealed class MMDPhysics
 
     /// <summary>
     /// reze 的 maxSubSteps=6 之外还有一道 wall-time 预算（performance.now EMA
-    /// 卸载）。MikuEngine 改为 tick 时钟（方案 B6：k=2，MaxCatchUp=4×k=8）硬上限
-    /// 取代之——wall clock 进子步决策会破坏 DET 确定性契约（同配置双跑必须逐位
-    /// 一致），且掉帧追赶的上限语义由 tickTarget 差值天然表达。
+    /// 卸载）。MikuEngine 改为 tick 时钟（k=2，MaxCatchUp=4×k=8）硬上限
+    /// 取代之,且掉帧追赶的上限语义由 tickTarget 差值天然表达。
     /// </summary>
     private const int MaxCatchUp = 8;
 
     // tick 时钟基准：上一渲染帧已消费到的 tickTarget。advance = 本帧 tickTarget − 它。
     private int _lastTickTarget;
-    // S1 开关的上一帧状态（OFF→ON 边沿检测）。开关状态属场景配置，纳入 DET 范围。
+    // 物理模拟开关的上一帧状态
     private bool _wasEnabled;
 
     // Fixed-timestep render interpolation ("Fix Your Timestep"): the dynamic body pose is
@@ -110,10 +110,10 @@ public sealed class MMDPhysics
     // was detected and settled.
     public int TeleportCount { get; private set; }
 
-    // B6 tick 域 target 采样：上一渲染帧的骨骼世界矩阵快照（帧末缓存）。
+    // tick 域 target 采样：上一渲染帧的骨骼世界矩阵快照（帧末缓存）。
     // kinematic 目标表达到「本帧末 tick 时刻」的骨骼姿态 = lerp(prevBone, curBone, s)，
     // s 由帧号域解析——这样 target 是动画帧号的纯函数，物理状态与渲染率解耦
-    // （DET-2：144Hz RealTime 与 FrameLocked 在同帧号处逐位一致）。
+    // （单测结果：144Hz RealTime 与 FrameLocked 在同帧号处逐位一致）。
     private float[] _prevBoneWorld = Array.Empty<float>();
     private float[] _boneSample = Array.Empty<float>();
     private bool _hasPrevBone;
@@ -259,7 +259,6 @@ public sealed class MMDPhysics
     /// 0.5 halves it, 0 leaves the body undamped and ringing. Idempotent — the
     /// authored values are snapshotted on first use, so repeated calls set rather
     /// than compound.
-    /// （S3 配套，方案 §7：随 B5 顺带移植，Stage 1 不接出 UI/API，reserved。）
     /// </summary>
     public void SetJiggleDamping(IReadOnlyList<int> boneIndices, float scale)
     {
@@ -301,7 +300,6 @@ public sealed class MMDPhysics
     /// simulated the inheritance has to consume the SIMULATED result, not the
     /// animated pose the frame started with. Nothing else can answer which bones
     /// those are: the mapping lives in this store.
-    /// （Stage 1 不做消费端，接口保留——方案 §7。）
     /// </summary>
     public List<int> GetPhysicsDrivenBones()
     {
@@ -357,7 +355,7 @@ public sealed class MMDPhysics
     }
 
     /// <summary>
-    /// Reset 三件事（方案 §7：snap / 清零 / reseed，照搬不"直觉"改写）。
+    /// Reset 三件事（snap / 清零 / reseed）。
     /// 乱序模拟后（时间轴拖动、发散）调用；首帧前调用是无操作（reze 同）。
     /// </summary>
     public void Reset(float[] boneWorldMatrices)
@@ -375,21 +373,20 @@ public sealed class MMDPhysics
     }
 
     /// <summary>
-    /// B6 引擎主入口：S1 gate + tick 时钟 + 三相位，一次调用完成一渲染帧的物理段。
+    /// 引擎主入口：物理开关 gate + tick 时钟 + 三相位，一次调用完成一渲染帧的物理段。
     /// 调用方在 FK/IK/付与（<c>SkeletalModel.UpdateWorldMatrices</c>）之后调用。
     ///
-    /// S1 语义（方案 §4-B6）：OFF = 跳过整个物理段，骨骼世界矩阵保持动画结果
+    /// 物理语义：OFF = 跳过整个物理段，骨骼世界矩阵保持动画结果
     /// （本方法不碰 boneWorldMatrices）；OFF→ON 边沿强制 <see cref="Reset"/>
     /// （snap 当前骨骼姿态 + 速度清零 + tick 基准同步，首帧无跳变）；ON→OFF
     /// 无操作（物理体留在原地，骨骼自然回动画姿态）。开关状态属场景配置，
-    /// 纳入 DET 范围——同配置双跑的 enabled 序列相同 ⇒ 状态序列相同。
     ///
     /// tick 时钟：<c>tickTarget = floor(frame × k)</c>（k=<see cref="TickRateMultiplier"/>），
     /// 本帧前进 advance = tickTarget − 上帧 tickTarget 个固定 tick；alpha =
     /// frame × k 的小数部分（Fix Your Timestep 的渲染插值相位）。advance ≤ 0
     /// （暂停/回卷）不推进模拟——回卷的骨骼突变由 teleport 检测兜底（carry/snap）。
     /// </summary>
-    /// <param name="enabled">S1 物理总开关（场景配置）。</param>
+    /// <param name="enabled">物理总开关（场景配置）。</param>
     /// <param name="boneWorldMatrices">骨骼世界矩阵（列主序 float[16×骨数]，FK/IK/付与结果）。</param>
     /// <param name="boneInverseBindMatrices">骨骼逆绑定矩阵（同布局；仅首帧初始化用）。</param>
     /// <param name="frame">当前连续动画帧号（<c>MmdAnimationPlayer.CurrentFrame</c>）。</param>
@@ -422,12 +419,12 @@ public sealed class MMDPhysics
         int advance = tickTarget - _lastTickTarget;
         _lastTickTarget = tickTarget;
 
-        // teleport 阈值按渲染帧动画时长（§6.4：250 units/s 按帧时间缩放）。
+        // teleport 阈值按渲染帧动画时长（：250 units/s 按帧时间缩放）。
         float dtAnim = (float)((frame - prevFrame) / PlaybackFps);
         if (dtAnim < 0) dtAnim = 0;
 
         // 目标采样到本帧末 tick 时刻（帧号 tickTarget/k）：target 成为帧号的
-        // 纯函数，渲染率只影响采样密度、不影响 tick 时刻的采样值（DET-2）。
+        // 纯函数，渲染率只影响采样密度、不影响 tick 时刻的采样值。
         float boneSampleT = 1f;
         if (advance > 0 && _hasPrevBone && frame > prevFrame && _prevBoneWorld.Length == boneWorldMatrices.Length)
         {
@@ -455,8 +452,8 @@ public sealed class MMDPhysics
     /// 宿主矩阵转换：SkeletalModel 的 <c>WorldMatrices</c>/<c>InverseBind</c> 是
     /// System.Numerics 行主序（v·M，平移在 M41..43），物理内核是列主序（M·v，
     /// 平移在 m[12..14]）。两者是**同一个变换的转置表示**：行主序存 Tᵀ 的线性
-    /// 序列 == 列主序存 T 的线性序列，因此正确转换就是 16 float 线性直拷
-    /// （§2.3.2 约定陷阱）。切不可再按下标重排——那会对已转置的存储再转一次，
+    /// 序列 == 列主序存 T 的线性序列，因此正确转换就是 16 float 线性直拷。
+    /// 切不可再按下标重排——那会对已转置的存储再转一次，
     /// 内核收到 Mᵀ：平移丢失进 w、旋转反向，蒙皮炸成薄片。
     /// </summary>
     public static void CopyMatricesToColumnMajor(System.Numerics.Matrix4x4[] source, float[] destination)
@@ -494,7 +491,7 @@ public sealed class MMDPhysics
     /// 相位 1：从当前骨骼姿态计算本帧 kinematic 目标，检测 teleport 并执行
     /// carry/snap。返回是否发生 teleport（teleport 计数见 <see cref="TeleportCount"/>）。
     /// 首帧自动完成 reze firstFrame 初始化（computeBoneOffsets + snap + seed）。
-    /// dt 为动画域帧时间（teleport 阈值与目标轨迹速度都用它）——B5 直调路径，
+    /// dt 为动画域帧时间（teleport 阈值与目标轨迹速度都用它，
     /// 引擎主路径走 <see cref="Update"/>（tick 域采样）。
     /// </summary>
     public bool SetKinematicTargets(float[] boneWorldMatrices, float[] boneInverseBindMatrices, float dt)
@@ -504,9 +501,9 @@ public sealed class MMDPhysics
 
     /// <summary>
     /// kinematic 目标核心。<paramref name="velocityDt"/>：目标差分的分母（动画域秒）——
-    /// tick 时钟下 = advance × TickDuration，与渲染率无关（DET-2 的另一半）；
+    /// tick 时钟下 = advance × TickDuration，与渲染率无关；
     /// <paramref name="dtThreshold"/>：teleport 阈值的帧时间（渲染帧动画时长）；
-    /// <paramref name="boneSampleT"/>：骨骼采样因子——&lt;1 时把目标表达到
+    /// <paramref name="boneSampleT"/>：骨骼采样因子——<1 时把目标表达到
     /// 「本帧末 tick 时刻」（lerp 上一渲染帧与当前渲染帧骨骼矩阵），使 target
     /// 成为帧号的纯函数；<paramref name="updateTargets"/>=false（tick 无进展的
     /// 渲染帧）只保证首帧初始化，不重算 target/velocity、不判 teleport。
@@ -686,7 +683,7 @@ public sealed class MMDPhysics
     /// 相位 2：tick 子步循环（B6 tick 时钟）。<paramref name="tickAdvance"/> =
     /// 本渲染帧 tickTarget 差值；每个 tick 固定 <see cref="TickDuration"/> 秒，
     /// 上限 <see cref="MaxCatchUp"/>，超限丢余量并 snap kinematic 到目标
-    /// （reze 的 backlog 分支）。tick 数由帧号唯一决定 ⇒ 同帧号双跑逐位一致（DET-1）。
+    /// （reze 的 backlog 分支）。tick 数由帧号唯一决定 ⇒ 同帧号双跑逐位一致。
     /// </summary>
     public void Step(int tickAdvance)
     {

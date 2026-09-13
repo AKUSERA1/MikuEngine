@@ -1,7 +1,7 @@
 namespace MikuEngine.Physics;
 
 /// <summary>
-/// One narrowphase contact point.（对照 reze physics/contact.ts Contact 逐字段移植）
+/// One narrowphase contact point.
 ///
 /// Contact convention: <c>Normal</c> points from body A toward body B, so a
 /// positive normal impulse pushes B away from A. <c>RA</c>/<c>RB</c> are
@@ -79,7 +79,7 @@ public sealed class Contact
 }
 
 /// <summary>
-/// Pool of reusable Contact objects.（对照 reze ContactPool；零分配——acquire 复用
+/// Pool of reusable Contact objects.（零分配——acquire 复用
 /// 池内已有对象，只有池增长时才 new，而池上界由 pair 数决定、随首帧稳定）
 /// </summary>
 public sealed class ContactPool
@@ -94,7 +94,7 @@ public sealed class ContactPool
             int newCap = _pool.Length == 0 ? 16 : _pool.Length * 2;
             Array.Resize(ref _pool, newCap);
         }
-        // 扩容后的槽位惰性填充（reze push 语义：每槽只在首次用到时创建一次）
+        // 扩容后的槽位惰性填充（每槽只在首次用到时创建一次）
         Contact c = _pool[Count] ??= new Contact();
         c.AppliedNormalImpulse = 0;
         c.AppliedFrictionImpulse1 = 0;

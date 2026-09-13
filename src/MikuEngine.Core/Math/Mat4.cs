@@ -1,9 +1,9 @@
 namespace MikuEngine.Core.Math;
 
 /// <summary>
-/// 自写列主序 float[16] 4x4 矩阵静态工具，对照 reze <c>math.ts</c> Mat4 的静态方法逐行移植。
+/// 列主序 float[16] 4x4 矩阵静态工具。
 /// 存储约定：列主序（m[0..3] 为第 0 列），平移在 m[12..14]，列向量乘法 M·v —— 与
-/// WGSL/GLSL、MMD、reze 一致，蒙皮矩阵缓冲可与 GLES <c>uniformMatrix4fv</c> 直传，无需转置。
+/// GLSL、MMD 一致，蒙皮矩阵缓冲可与 GLES <c>uniformMatrix4fv</c> 直传，无需转置。
 /// </summary>
 /// <remarks>
 /// 注意：<see cref="System.Numerics.Matrix4x4"/> 是行主序存储 + 行向量乘法（v·M，XNA 血统，
@@ -12,7 +12,7 @@ namespace MikuEngine.Core.Math;
 /// </remarks>
 public static class Mat4
 {
-    /// <summary>Reset matrix to identity in place（对照 reze body.ts 的 identity16 / Mat4.setIdentity）。</summary>
+    /// <summary>Reset matrix to identity in place。</summary>
     public static void SetIdentity(float[] m, int offset)
     {
         m[offset + 0] = 1;
@@ -35,7 +35,7 @@ public static class Mat4
 
     /// <summary>
     /// Static method to multiply two matrix array segments directly into output array (no object creation)
-    /// Column-major multiplication: result = a * b（对照 reze Mat4.multiplyArrays）。
+    /// Column-major multiplication: result = a * b。
     /// </summary>
     public static void MultiplyArrays(float[] a, int aOffset, float[] b, int bOffset, float[] output, int outputOffset)
     {
@@ -56,7 +56,7 @@ public static class Mat4
         }
     }
 
-    /// <summary>Write rotation matrix from quaternion into existing array (column-major)。（对照 reze Mat4.fromQuatInto）</summary>
+    /// <summary>Write rotation matrix from quaternion into existing array (column-major)。</summary>
     public static void FromQuatInto(float x, float y, float z, float w, float[] output, int offset)
     {
         float x2 = x + x, y2 = y + y, z2 = z + z;
@@ -84,7 +84,7 @@ public static class Mat4
     /// <summary>
     /// Fused local transform: out = T(bindT) · R(quat) · T(localT).
     /// Result translation = bindT + R * localT; rotation column block = R.
-    /// Column-major. Zero allocations.（对照 reze Mat4.localTransformInto）
+    /// Column-major. Zero allocations.
     /// </summary>
     public static void LocalTransformInto(
         float bx, float by, float bz,
@@ -108,7 +108,7 @@ public static class Mat4
         output[offset + 15] = 1;
     }
 
-    /// <summary>Write position+rotation transform into existing array.（对照 reze Mat4.fromPositionRotationInto）</summary>
+    /// <summary>Write position+rotation transform into existing array.</summary>
     public static void FromPositionRotationInto(
         float px, float py, float pz,
         float qx, float qy, float qz, float qw,
@@ -123,7 +123,7 @@ public static class Mat4
     /// <summary>
     /// Full 4x4 matrix inverse using adjugate method. Works for any invertible matrix, not just
     /// orthonormal transforms（骨骼层级变换后的矩阵含缩放/非正交成分，不能用正交假设的逆转置）。
-    /// Returns true on success, false if singular (out untouched).（对照 reze Mat4.inverseInto）
+    /// Returns true on success, false if singular (out untouched).
     /// </summary>
     public static bool InverseInto(float[] m, float[] output)
     {
@@ -169,8 +169,7 @@ public static class Mat4
     /// Extract the rotation block as a unit quaternion (xyzw) into q[qOffset..].
     /// Branch-by-trace on the rotation diagonal; the intermediate arithmetic runs
     /// in double because reze's JS numbers are float64 and the near-degenerate
-    /// branches lose unit length quickly in float32.（对照 reze math.ts
-    /// Mat4.toQuatFromArrayInto L1013-1050，hypot 归一化以 double 复算）
+    /// branches lose unit length quickly in float32.
     /// </summary>
     public static void ToQuatInto(float[] m, int offset, float[] q, int qOffset)
     {

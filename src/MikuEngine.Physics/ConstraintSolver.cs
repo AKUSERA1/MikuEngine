@@ -11,17 +11,15 @@
 //   2. ITERATE — `iterations` passes that read the cache and apply impulses
 //      based on the current lv/av. ~2× faster than recomputing per iter.
 //
-// （对照 reze physics/solver.ts 逐行移植。精度注记：reze 是 JS number（f64 中间
-// 计算 + f32 存储）；本移植按方案 §2.3 统一 float32，仅保留 reze 明确设为 f64
-// 通道的 SolverCache.D（geodesic 行标量）为 double[]——若 M-CHAIN-1 长链验证
-// 发现不可接受发散，再把内循环关键累加切局部 double。）
+// reze 是 JS number（f64 中间计算 + f32 存储）；本移植统一 float32，
+// 仅保留 reze 明确设为 f64通道的 SolverCache.D（geodesic 行标量）为 double[]）
 
 using MikuEngine.Core.Math;
 
 namespace MikuEngine.Physics;
 
 /// <summary>
-/// Flat solver cache (SoA)（对照 reze solver.ts SolverCache）。
+/// Flat solver cache (SoA)
 /// One typed-array block instead of a dozen small arrays per constraint:
 /// the 10-iteration hot loop walks memory linearly off a single base pointer
 /// instead of pointer-chasing ~1000 scattered objects. Layout below mirrors the
@@ -387,7 +385,6 @@ public static class ConstraintSolver
     /// <summary>
     /// SETUP: compute everything that doesn't depend on velocities. Caller
     /// guarantees pos/ori don't change between this and the iter loop.
-    /// （对照 reze solver.ts setupConstraint）
     /// </summary>
     private static void SetupConstraint(
         SixDofSpringConstraint con,
@@ -544,7 +541,7 @@ public static class ConstraintSolver
             }
             else if (!(lo == hi && con.IsLoop))
             {
-                // reze 原样：locked loop 轴保持上一步的值（首步为 0，之后也不会被
+                // locked loop 轴保持上一步的值（首步为 0，之后也不会被
                 // 置 1——置 1 分支要求 lo != hi，故语义上恒为 0）。
                 I[ib + SolverCache.ILinSprAct + i] = 0;
             }
@@ -744,7 +741,6 @@ public static class ConstraintSolver
 
     /// <summary>
     /// ITER: read cache, compute relVel from current lv/av, apply impulse.
-    /// （对照 reze solver.ts iterateConstraint）
     /// </summary>
     private static void IterateConstraint(
         int ci,
@@ -999,7 +995,6 @@ public static class ConstraintSolver
     /// SETUP: pre-compute Jacobians, friction basis, and the bounce reference
     /// from the *initial* closing velocity (Bullet's pattern — captures restitution
     /// before iter 1 zeroes out the approach).
-    /// （对照 reze solver.ts setupContactRow）
     /// </summary>
     private static void SetupContactRow(
         Contact c,

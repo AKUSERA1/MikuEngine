@@ -193,9 +193,9 @@ public sealed class SkeletalModel
     /// <summary>軸制限轴（<b>已归一化</b>；<see cref="Vector3.Zero"/> = 无限制）。带限制的骨只能绕该轴旋转。</summary>
     public Vector3[] AxisLimits = Array.Empty<Vector3>();
 
-    // ── IK（反向动力学）─────────────────────────────────────────────────
+    // ── IK ─────────────────────────────────────────────────
     //
-    // 设计要点（详见 docs/2026-09-12-mmd-ik-design.md）：
+    // 设计要点：
     //   * IK 结果写进【独立】的 IkRotations[]，**绝不回写 LocalRotations**。付与是在
     //     UpdateWorldMatrices 内、且刻意不回写 LocalRotations 以保证幂等；一旦 IK 回写 LocalRotations，
     //     下一帧付与会把上次的 IK 同时继承一次（双重付与），且本方法不再幂等。
@@ -227,7 +227,7 @@ public sealed class SkeletalModel
     /// </summary>
     public bool[] IkEnabled = Array.Empty<bool>();
 
-    /// <summary>IK 求解总开关（A/B 对照用；关闭时 <see cref="IkRotations"/> 恒为单位阵）。</summary>
+    /// <summary>IK 求解总开关（关闭时 <see cref="IkRotations"/> 恒为单位阵）。</summary>
     public bool IkSolverEnabled = true;
 
     // 付与求值需要「源骨的最终局部变换」，而已完成骨的最终值不能再覆盖 Local*（否则重复调用
@@ -238,25 +238,23 @@ public sealed class SkeletalModel
     /// <summary><see cref="UpdateWorldMatricesSubtree"/> 的子树标记，复用避免每帧分配。</summary>
     private bool[] _subtreeMask = Array.Empty<bool>();
 
-    // ── 物理后付与（PostPhysicsAppend / S3）─────────────────────────────
+    // ── 物理后付与（PostPhysicsAppend）─────────────────────────────
     //
     // 物理写回只发布被模拟骨的【世界矩阵】，而付与求值读的是源骨的「最终局部变换」——
     // 付与链挂在物理驱动骨上时（胸 rig：可见骨付与自 胸_回転 这类被模拟骨），不重算
     // 的付与骨会永远穿着物理前的动画姿态。加载期由 <see cref="SetPhysicsDrivenBones"/>
-    // 预计算重算集合（reze setPhysicsDrivenBones 同构闭包）；每帧物理写回后
-    // <see cref="ApplyPhysicsAppend"/> 把模拟骨的最终局部变换从世界矩阵反解回
-    // _finalRotations/_finalTranslations 暂存，再按 deform 序只重算受影响子集。
+    // 预计算重算集合；每帧物理写回后<see cref="ApplyPhysicsAppend"/>
+    // 把模拟骨的最终局部变换从世界矩阵反解回_finalRotations/_finalTranslations 暂存，
+    // 再按 deform 序只重算受影响子集。
     //
     // 暂存每帧由 UpdateWorldMatrices 从 Local* 全量重建 ⇒ 这里的写入无跨帧泄漏：
-    // 物理前的全量 pass 永远读到纯动画（reze 需要 override 数组 + 读路径特判，是
-    // 因为它的 localRotations 是跨帧持久状态；本项目的暂存架构不需要）。
+    // 物理前的全量 pass 永远读到纯动画。
     private int[]? _physicsAppendOrder;
     private int[]? _physicsAppendSources;
 
     /// <summary>
     /// 最近一次 <see cref="UpdateWorldMatrices"/> 算出的「付与之后」的最终局部旋转/平移（只读）。
-    /// <see cref="IkSolverEnabled"/> 为 false 时跑一次，得到的就是「付与之后、IK 之前」的有效局部变换 ——
-    /// IK 诊断导出靠它让外部（Node 侧的 reze oracle）能原样重放同一套骨架，不必复刻付与/軸制限。
+    /// <see cref="IkSolverEnabled"/> 为 false 时跑一次，得到的就是「付与之后、IK 之前」的有效局部变换。
     /// </summary>
     public ReadOnlySpan<Quaternion> FinalRotations => _finalRotations;
 
@@ -362,8 +360,8 @@ public sealed class SkeletalModel
     }
 
     /// <summary>
-    /// 物理后付与拓扑预计算（S3，加载期一次）。<paramref name="drivenBones"/> = 被物理
-    /// 覆写世界矩阵的骨骼（<c>MMDPhysics.GetPhysicsDrivenBones</c>：Dynamic 体绑定的骨，
+    /// 物理后付与拓扑预计算。<paramref name="drivenBones"/> = 被物理覆写世界矩阵的
+    /// 骨骼（<c>MMDPhysics.GetPhysicsDrivenBones</c>：Dynamic 体绑定的骨，
     /// mode-2 在加载层映射为 Dynamic 故天然包含）。闭包规则：付与继承自「物理驱动 ∪
     /// 已受影响」或父骨已受影响的骨进入重算集合，物理驱动骨自身被刻意排除（它们的
     /// 世界矩阵就是物理输出，重算会丢结果）。空拓扑时 <see cref="ApplyPhysicsAppend"/>
@@ -381,7 +379,7 @@ public sealed class SkeletalModel
             if ((uint)b < (uint)n) driven[b] = true;
 
         // 不动点闭包：deform 序里父边与付与边都指向前方，正常数据一趟即收敛；
-        // while 循环是对非法数据（付与环）的防御，与 reze 同构。
+        // while 循环是对非法数据（付与环）的防御。
         bool[] affected = new bool[n];
         bool changed = true;
         while (changed)
@@ -434,7 +432,7 @@ public sealed class SkeletalModel
     public int PhysicsAppendBoneCount => _physicsAppendOrder?.Length ?? 0;
 
     /// <summary>
-    /// 物理后付与（S3，每帧在物理写回之后调用）：把付与源（物理驱动骨）的「最终局部
+    /// 物理后付与（每帧在物理写回之后调用）：把付与源（物理驱动骨）的「最终局部
     /// 变换」从物理写回的世界矩阵反解回暂存，再按 deform 序重算受影响子集的世界/
     /// 蒙皮矩阵。未建拓扑时 O(1) 早退。
     ///
@@ -462,14 +460,14 @@ public sealed class SkeletalModel
             if (p >= 0)
             {
                 Matrix4x4 pw = WorldMatrices[p];
-                // 刚体：父世界矩阵的旋转块正交，逆 = 共轭四元数（reze 的基转置同构）。
+                // 刚体：父世界矩阵的旋转块正交，逆 = 共轭四元数
                 Quaternion parentInv = Quaternion.Conjugate(Quaternion.CreateFromRotationMatrix(pw));
                 _finalRotations[i] = Quaternion.CreateFromRotationMatrix(w) * parentInv;
                 _finalTranslations[i] = Vector3.Transform(w.Translation - pw.Translation, parentInv);
             }
             else
             {
-                // 根骨：局部 = 世界（reze："With no parent the world basis already IS the local one"）。
+                // 根骨：局部 = 世界
                 _finalRotations[i] = Quaternion.CreateFromRotationMatrix(w);
                 _finalTranslations[i] = w.Translation;
             }
@@ -574,7 +572,7 @@ public sealed class SkeletalModel
 
     /// <summary>
     /// 返「单位四元数与 <paramref name="q"/> 之间、进度为 |ratio|」的旋转。
-    /// 比率为负时先取共轭（= 反向旋转），这与 MMD 付与的 ratio &lt; 0 语义一致
+    /// 比率为负时先取共轭（= 反向旋转），这与 MMD 付与的 ratio < 0 语义一致
     /// （腰キャンセル 用 -1.0 来抵消腰的旋转）。
     /// </summary>
     private static Quaternion AppendRotation(Quaternion q, float ratio)

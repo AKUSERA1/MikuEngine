@@ -2,27 +2,18 @@ using System.Numerics;
 
 namespace MikuEngine.Core.Math;
 
-/// <summary>
-/// reze <c>math.ts</c> Quat 子集在 <see cref="System.Numerics.Quaternion"/> 上的补齐。
-/// 移植原则：逐行对照翻译，reze 注释里的行为决策原样保留为 C# 注释。
-/// System.Numerics.Quaternion/Vector3 为 struct，栈上传递即零分配，天然替代 reze 的
-/// <c>*Into</c> 输出缓冲 + scratch 槽设计（返回值按寄存器语义写回，无堆分配）。
-/// </summary>
 /// <remarks>
 /// 约定陷阱：System.Numerics 的 <see cref="Matrix4x4"/> 是行主序 + 行向量（v·M），与
-/// MMD/babylon/reze 的列主序（M·v）互为转置——本类只做向量/四元数代数，不涉及矩阵；
+/// MMD 的列主序（M·v）互为转置——本类只做向量/四元数代数，不涉及矩阵；
 /// 矩阵一律用 <see cref="Mat4"/>（列主序 float[16]）。
 /// </remarks>
 public static class QuatMath
 {
     /// <summary>
-    /// 球面线性插值。M-MATH-1 行为锁定结论：BCL <see cref="Quaternion.Slerp"/> 在
-    /// 近平行分支（cos &gt; 1-1e-6）做纯 lerp 不归一化，且阈值（1-1e-6）与 reze
-    /// （0.9995）不同，与 reze slerpInto 偏差 ~1e-4，超出黄金值容差 1e-6，
-    /// 故按方案 §2.3 换为对照 reze Quat.slerpInto 的自写实现。
+    /// 球面线性插值。BCL <see cref="Quaternion.Slerp"/> 在近平行分支（cos > 1-1e-6）做纯 lerp 不归一化
     /// </summary>
     /// <param name="a">单位四元数起点。</param>
-    /// <param name="b">单位四元数终点（dot&lt;0 时内部取负走最短弧）。</param>
+    /// <param name="b">单位四元数终点（dot<0 时内部取负走最短弧）。</param>
     /// <param name="t">插值参数 [0,1]。</param>
     public static Quaternion Slerp(Quaternion a, Quaternion b, float t)
     {
@@ -46,7 +37,6 @@ public static class QuatMath
             float y = a.Y + t * (by - a.Y);
             float z = a.Z + t * (bz - a.Z);
             float w = a.W + t * (bw - a.W);
-            // reze 用 Math.hypot（JS double）；float32 值域内 Sqrt(x²+y²+z²+w²) 等价
             float invLen = 1f / MathF.Sqrt(x * x + y * y + z * z + w * w);
             return new Quaternion(x * invLen, y * invLen, z * invLen, w * invLen);
         }
@@ -65,8 +55,8 @@ public static class QuatMath
     }
 
     /// <summary>
-    /// out = normalized lerp from a to b, taking the shorter path (negates b when dot &lt; 0).
-    /// Cheaper than slerp; non-constant angular velocity.（对照 reze Quat.nlerpInto）
+    /// out = normalized lerp from a to b, taking the shorter path (negates b when dot < 0).
+    /// Cheaper than slerp; non-constant angular velocity.
     /// </summary>
     public static Quaternion Nlerp(Quaternion a, Quaternion b, float t)
     {
@@ -82,7 +72,7 @@ public static class QuatMath
 
     /// <summary>
     /// out = v rotated by unit quaternion q (no matrix, no allocation).
-    /// v' = v + 2*qw*(qv × v) + 2*(qv × (qv × v))（对照 reze Quat.rotateVecInto）。
+    /// v' = v + 2*qw*(qv × v) + 2*(qv × (qv × v))
     /// </summary>
     public static Vector3 RotateVec(Quaternion q, Vector3 v)
     {
@@ -98,7 +88,7 @@ public static class QuatMath
             vz + qw * tz + qx * ty - qy * tx);
     }
 
-    /// <summary>out = v rotated by the inverse (conjugate) of unit quaternion q.（reze Quat.rotateVecInvInto）</summary>
+    /// <summary>out = v rotated by the inverse (conjugate) of unit quaternion q.</summary>
     public static Vector3 RotateVecInv(Quaternion q, Vector3 v)
     {
         float qx = -q.X, qy = -q.Y, qz = -q.Z, qw = q.W;
@@ -113,8 +103,7 @@ public static class QuatMath
     }
 
     /// <summary>
-    /// out = quaternion from axis (unnormalized) and angle。reze 版内部归一化轴
-    /// （len&gt;0 ? 1/len : 0），与 BCL CreateFromAxisAngle（假定轴已单位化）不同，故自写。
+    /// out = quaternion from axis (unnormalized) and angle
     /// </summary>
     public static Quaternion FromAxisAngle(float ax, float ay, float az, float angle)
     {
@@ -129,8 +118,7 @@ public static class QuatMath
     /// <summary>
     /// out = rotation taking the standard basis onto the orthonormal axes x, y, z
     /// (the columns of the column-major rotation matrix): rotateVec(out, (1,0,0)) = x, etc.
-    /// Matches Babylon's FromUnitVectorsToRef exactly…（对照 reze Quat.fromBasisInto，
-    /// Shepperd's method；正交基输入下输出即单位四元数，无需再归一化）
+    /// Matches Babylon's FromUnitVectorsToRef exactly…
     /// </summary>
     public static Quaternion FromBasis(Vector3 x, Vector3 y, Vector3 z)
     {
@@ -178,8 +166,7 @@ public static class QuatMath
     /// <summary>
     /// out = shortest-arc rotation taking unit vector from to unit vector to.
     /// Matches Babylon's FromUnitVectorsToRef exactly, including the near-antiparallel
-    /// branch (w = 1 + dot &lt; 0.001 → 180° about a perpendicular picked the same way).
-    /// （对照 reze Quat.fromUnitVectorsInto）
+    /// branch (w = 1 + dot < 0.001 → 180° about a perpendicular picked the same way).
     /// </summary>
     public static Quaternion FromUnitVectors(Vector3 from, Vector3 to)
     {
@@ -211,7 +198,7 @@ public static class QuatMath
     /// <summary>
     /// out = twist component of q around unit axis a, so that q = swing · twist
     /// (swing = Quat.multiply(q, conjugate(twist))). Singular when q is ~180° about an
-    /// axis perpendicular to a — returns identity there.（对照 reze Quat.twistAroundAxisInto）
+    /// axis perpendicular to a — returns identity there.
     /// </summary>
     public static Quaternion TwistAroundAxis(Quaternion q, Vector3 a)
     {
@@ -228,9 +215,9 @@ public static class QuatMath
     }
 
     /// <summary>
-    /// Convert Euler angles to quaternion (ZXY order, left-handed, PMX format)。
+    /// Convert Euler angles to quaternion (ZXY order, left-handed, PMX format)
     /// PMX 刚体 bind 姿态欧拉 → 四元数用这个（RigidBodyStore 构造路径），不做
-    /// 万向锁特殊处理，直接公式 + 末尾归一化（对照 reze Quat.fromEuler）。
+    /// 万向锁特殊处理，直接公式 + 末尾归一化。
     /// </summary>
     public static Quaternion FromEuler(float rotX, float rotY, float rotZ)
     {

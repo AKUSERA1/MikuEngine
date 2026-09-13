@@ -10,7 +10,6 @@
 //   L554  Toon：tex2D(ToonSampler, float2(UV.x, ToonCf(Normal)))
 //
 // 修订：自阴影为【内联 PCF】直接采样光照深度图（不再有屏幕空间 mask），
-// 并按 uShadowStyle 走三路注入（见 docs/2026-09-10-shadow-provider-design.md §0b.3）：
 //   1 = 标准本影（PE 16-tap，ToonMode 二选一 / 压 YCrCb）
 //   2 = 硬边本影（连续场高斯模糊 + smoothstep 阈值提取 + 影色；硬核心 + 平滑边界）
 //   3 = 普通阴影（PCF 软影 + 直接遮蔽乘子）
@@ -39,15 +38,15 @@ uniform float uEnableSphere;
 uniform float uEnableToon;
 uniform float uSphereMode;   // 1 = Multiply, 2 = Add, 3 = SubTexture
 uniform float uToonMode;     // 0 = None, 1 = Type1(MMD), 2 = Type2(固有) —— PE L47
-uniform float uEnableSelfShadow;  // 0 关 / >0 开（阶段 1 收影侧旗标按材质决定此值）
-uniform sampler2DShadow uShadowZMap;  // 光照深度图（unit 3，比较采样器 —— 方案 B）
+uniform float uEnableSelfShadow;  // 0 关, >0 开
+uniform sampler2DShadow uShadowZMap;  // 光照深度图（unit 3，比较采样器 ）
 uniform float uShadowTexel;       // 1/影子图边长，PCF 核缩放（单一来源，阶段 0）
 uniform float uSelfShadowStrength;// 影强度（全局，三模式共享；0 = 全受光，隔离测试用）
 uniform float uShadowStyle;       // 1=标准本影 2=硬边本影（阈值提取）3=普通阴影
 uniform vec4  uShadowColor;       // 硬边本影的影色 —— 乘性暗度，非替换色
-uniform float uShadowBias;        // 深度比较偏置的【常数底】（阶段 7；默认 0.0005）
-uniform float uShadowSlopeBias;   // 斜率缩放系数（阶段 7）：乘在「一个 texel 内自身深度变化」上
-uniform float uShadowBiasMax;     // 偏置上限（阶段 7；默认 0.003 = 旧的全屏常数，掠射端封顶用）
+uniform float uShadowBias;        // 深度比较偏置的【常数底】默认 0.0005）
+uniform float uShadowSlopeBias;   // 斜率缩放系数：乘在「一个 texel 内自身深度变化」上
+uniform float uShadowBiasMax;     // 偏置上限（默认 0.003 = 旧的全屏常数，掠射端封顶用）
 uniform float uShadowSoftness;    // 硬边本影的核宽 / 普通阴影的 PCF 核宽（>1 更软）
 uniform float uShadowEdge;        // 硬边本影的阈值带宽 w（越小越硬，0.3~0.5 为硬边观感）
 

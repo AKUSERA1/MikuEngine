@@ -67,7 +67,7 @@ public readonly struct MmdIkLink
 /// <b>链序</b>：<see cref="Links"/> 保持 PMX 文件顺序 = **末端侧 → 根**
 /// （reze-engine <c>model.ts</c>：<c>links: IKLink[] // Chain bones from effector to root</c>）。
 /// 因此每轮转角上限 <c>LimitAngle * (index + 1)</c> 会让越靠根的骨获得越大的预算
-/// （足 IK 的 <c>[ひざ, 足]</c> ⇒ 大腿 2× &gt; 小腿 1×），与解剖直觉一致。
+/// （足 IK 的 <c>[ひざ, 足]</c> ⇒ 大腿 2× > 小腿 1×），与解剖直觉一致。
 /// </summary>
 public sealed class MmdIkChain
 {
@@ -77,7 +77,7 @@ public sealed class MmdIkChain
     /// <summary>PMX <c>Ik.Target</c> 所指的骨 —— 被驱动端（活跃）。</summary>
     public required int Driven { get; init; }
 
-    /// <summary>迭代次数上限（已按 PmxEditor 钳到 256）。</summary>
+    /// <summary>迭代次数上限（按 PmxEditor 钳到 256）。</summary>
     public required int Iteration { get; init; }
 
     /// <summary>每轮转角基准（PMX 的 rotationConstraint，弧度）。</summary>

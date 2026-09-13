@@ -5,7 +5,7 @@ namespace MikuEngine.Core.Math;
 /// <summary>
 /// MMD 专用数学工具。矩阵约定：MMD/PMX 是列主序存储 + 列向量乘法（M·v，平移在 m[12..14]），
 /// 与 System.Numerics.Matrix4x4 的行主序存储 + 行向量乘法（v·M，XNA 血统）互为转置——
-/// 两者并不一致（此前头注释的说法有误）。跨约定传递矩阵必须显式转置并注释理由。
+/// 两者并不一致。跨约定传递矩阵必须显式转置并注释理由。
 /// 物理与骨骼同步路径一律使用列主序的 MikuEngine.Core.Math.Mat4；
 /// System.Numerics 的 Vector3/Quaternion 不涉及存储约定，可放心使用。
 /// </summary>
@@ -45,8 +45,7 @@ public static class MmdMath
         float cosYcosX = 1f - 2f * (q.X * q.X + q.Y * q.Y);
         euler.Y = MathF.Atan2(sinYcosX, cosYcosX);
 
-        // Z（roll）= atan2(m12, m22) = atan2(2(wx + yz), 1 - 2(x² + y²)) 不对
-        // 正确公式：atan2(2(wz + xy), 1 - 2(x² + z²))
+        // Z（roll）= atan2(2(wz + xy), 1 - 2(x² + z²))
         float sinZcosX = 2f * (q.W * q.Z + q.X * q.Y);
         float cosZcosX = 1f - 2f * (q.X * q.X + q.Z * q.Z);
         euler.Z = MathF.Atan2(sinZcosX, cosZcosX);

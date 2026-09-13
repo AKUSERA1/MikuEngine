@@ -8,7 +8,7 @@ namespace MikuEngine.Core.Animation;
 ///
 /// 关键帧按帧号<b>严格升序</b>，同一帧号去重并保留文件顺序的最后一次出现
 /// （与 babylon-mmd <c>vmdLoader</c> 的 duplicate resolve 一致）。
-/// 旋转序列在构建时已做<b>最短弧</b>处理（与前一键 dot &lt; 0 则取负），
+/// 旋转序列在构建时已做<b>最短弧</b>处理（与前一键 dot < 0 则取负），
 /// 因此键间 slerp 天然走短弧，且相邻键四元数同半球。
 /// </summary>
 public sealed class MmdBoneTrack
@@ -125,7 +125,7 @@ public sealed class MmdBoneTrack
         return offset;
     }
 
-    /// <summary>返回轨道内最后一个 <c>Frames[i] &lt;= frame</c> 的 i；若 frame 早于首键返回 -1。</summary>
+    /// <summary>返回轨道内最后一个 <c>Frames[i] <= frame</c> 的 i；若 frame 早于首键返回 -1。</summary>
     internal static int FindSegmentStart(int[] frames, double frame)
     {
         int lo = 0, hi = frames.Length;
@@ -246,7 +246,6 @@ public sealed class MmdMorphTrack
 ///
 /// 表示枠是离散状态，因此键与键之间<b>保持</b>、绝不插值；帧号早于首键时返回 true（可见）——
 /// 未声明「非表示」的动效应照常渲染。IK 开关随键保留（<see cref="IkStates"/>），
-/// 本引擎无 IK ⇒ 不消费。
 ///
 /// 与骨骼 / morph 轨道不同，本轨道是<b>整模型</b>量，不参与「按模型绑定」的过滤。
 /// </summary>
@@ -267,7 +266,7 @@ public sealed class MmdPropertyTrack
     public int KeyCount => Frames.Length;
 
     /// <summary>
-    /// 阶梯采样（帧号的纯函数）：取最后一个 <c>Frames[i] &lt;= frame</c> 的可见性。
+    /// 阶梯采样（帧号的纯函数）：取最后一个 <c>Frames[i] <= frame</c> 的可见性。
     /// 早于首键 → true；晚于末键 → 保持末键状态；空轨道 → 恒 true。
     /// </summary>
     public bool SampleVisible(double frame)

@@ -9,7 +9,6 @@ namespace MikuEngine.Physics;
 /// TA = worldA · frameA, TB = worldB · frameB. The 6 DOFs are the linear
 /// diff in TA's basis (axes 0..2) and the Euler-XYZ angular diff between
 /// TA's and TB's basis (axes 3..5).
-/// （对照 reze physics/constraint.ts SixDofSpringConstraint 逐字段移植）
 ///
 /// Springs (when enabled) drive each DOF toward equilibriumPoint[i] with
 /// stiffness[i]. Per-axis stop ERP is <see cref="ConstraintBuilder.StopErp"/>
@@ -25,7 +24,7 @@ public sealed class SixDofSpringConstraint
     public readonly float[] FrameB = new float[16];
 
     /// <summary>
-    /// Per-axis limits. For each i: when min[i] &gt; max[i] the axis is free
+    /// Per-axis limits. For each i: when min[i] > max[i] the axis is free
     /// (Bullet's "free" convention); when min[i] == max[i] the axis is locked.
     /// </summary>
     public readonly float[] LinearMin = new float[3];
@@ -54,7 +53,6 @@ public sealed class SixDofSpringConstraint
 ///   frameA = (bodyA_worldBind)^-1 · jointWorldBind
 ///   frameB = (bodyB_worldBind)^-1 · jointWorldBind
 /// Equilibrium is zero on every axis (both frames coincide at bind pose).
-/// （对照 reze physics/constraint.ts buildConstraints 逐行移植）
 /// </summary>
 public static class ConstraintBuilder
 {
