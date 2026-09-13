@@ -178,8 +178,6 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         var st = _device.Gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
         if (st != GLEnum.FramebufferComplete)
             Console.WriteLine($"[GlesShadowRenderer] {name} FBO 不完整：{st}");
-        else
-            Console.WriteLine($"[GlesShadowRenderer] {name} FBO complete（{_size}²）");
     }
 
     /// <summary>
@@ -234,8 +232,6 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         // 模型边缘 ≤ 0.85（淡出带 0.88→0.96 在模型外），+1 单位余量，ceil 整数稳定量子
         _e = MathF.Ceiling(MathF.Max(er, eu) / 0.85f) + 1f;
         float texel = 2f * _e / _size;
-        Console.WriteLine($"[GlesShadowRenderer] 紧视锥：投影半径 er={er:F2} eu={eu:F2} → 半宽 {_e:F0} " +
-                          $"(span {2f * _e:F1})  密度 {_size / (2f * _e):F1} texels/unit @ {_size}²");
 
         // ── 2. texel snapping：目标点吸附到 texel 网格 ─────────────────────
         float tr = MathF.Round(Vector3.Dot(center, r) / texel) * texel;

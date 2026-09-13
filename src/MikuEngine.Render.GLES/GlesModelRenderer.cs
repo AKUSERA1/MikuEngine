@@ -421,6 +421,25 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     public bool PhysicsEnabled { get; set; } = true;
 
     /// <summary>
+    /// S2 地面碰撞开关（场景配置，宿主按键切换）。默认 ON（MMD 本体默认有地面）。
+    /// 内置地面 = 内核构造时追加的无骨骼 static box，顶面 = 模型空间 y=0——地面跟随
+    /// 模型原点（角色被举起时她的地面跟着走），发梢/裙摆落在"她自己的脚下"。
+    /// SetFloor 只翻转 store.GroundIndex 开关位：体常驻、不扰动求解器缓存的任何索引，
+    /// 任意 tick 边界热切安全，无需 reset。
+    /// </summary>
+    public bool GroundCollisionEnabled
+    {
+        get => _groundCollisionEnabled;
+        set
+        {
+            if (_groundCollisionEnabled == value) return;
+            _groundCollisionEnabled = value;
+            Physics?.SetFloor(value);
+        }
+    }
+    private bool _groundCollisionEnabled = true;
+
+    /// <summary>
     /// 本渲染帧的连续动画帧号（宿主从 MmdTimeline.CurrentFrame 注入）。物理 tick 时钟
     /// tickTarget = floor(frame × k) 由它驱动——动画暂停/未加载时帧号不推进，物理随之
     /// 冻结（MMD 行为：物理随动画走）。

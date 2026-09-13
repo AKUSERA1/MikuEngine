@@ -18,16 +18,14 @@ using MikuEngine.Engine;
 //   ③ model.vert / model.frag（Phong + Toon + Sphere + 三队列 alpha）
 //
 // 操作：
-//   鼠标：左键=旋转 | 右键=平移 | 滚轮=缩放
-//   B    ：给"上半身"骨骼加 30° 旋转 —— 用于确认蒙皮链路真的生效
-//          （静态绑定姿势下蒙皮矩阵是单位阵，不足以证明 skinning 正确）
-//   R    ：重置姿势
-//   动画（Mixer 多动效，Motion/ 下存在对应 VMD 时自动加载）：
+//   鼠标 ：左键=旋转 | 右键=平移 | 滚轮=缩放
+//   动画（Motion/ 下存在对应 VMD 时自动加载）：
 //     动作+IK.vmd（骨动效 + 足ＩＫ/つま先ＩＫ 目标 + 表情，单层播放）
 //     —— 原 Motion.vmd + Lips/Eyes/Facial 四层组合保留在 motionFiles 的注释里，需要时一行切回
-//   空格 ：暂停/播放 | ←/→ ：∓1 帧 | ↑/↓ ：帧率 ±6 | F ：回首帧 | V ：动画驱动开关
+//   空格 ：暂停/播放 | ←/→ ：∓1 帧 | ↑/↓ ：帧率 ±6 | F ：回首帧
+//   E    ：轮廓线开关 | 1/2/0 ：自阴影 关/自阴影/自阴影+床影 | S ：自阴影风格循环
 //   P    ：物理模拟开关（Stage 1 S1；裙/发/胸随动效摆动，OFF 回纯动画，OFF→ON 自动 snap）
-//   [    ：把 test1.vmd 导入当前帧（任意帧导入演示） | ] ：移除导入层 | ; ：导入层权重循环 | ' ：层列表
+//   G    ：地面碰撞开关（Stage 1 S2；模型空间 y=0 内置地面，默认开）
 //
 // --smoke     ：无人值守自检。隐藏窗口跑 40 帧 → 强制开影模式 1 → 打印中间 RT 统计 → 退出。
 //               （跳过动画加载：自阴影/轮廓线这类多 pass 功能的"静默失效"没法靠肉眼看画面定位，
@@ -106,23 +104,14 @@ var camera = new OrbitCamera(
 
 var input = new OrbitInputController(camera, enabled: true);
 
-// 骨骼测试用（按 B 切换）
-int testBoneIndex = -1;
-bool poseApplied = false;
-
-// VMD 动画（Step 5d-4 MmdTimeline）：Motion/ 下的骨动效 + 三个表情槽位动效自动加载；
-// [ 把另一条 VMD 导入当前帧 / ] 移除 / ; 循环权重 / ' 打印层列表
+// VMD 动画（Step 5d-4 MmdTimeline）：Motion/ 下的 VMD 自动加载为单层时间轴
 MmdTimeline? timeline = null;
-var baseLayers = new List<(string Desc, string File, MmdAnimationLayer Layer)>();
-MmdAnimationLayer? importedLayer = null;   // [ 键导入的层（演示任意帧导入与清除）
-string importedFile = "";
-float importedWeight = 1f;                 // ; 键循环 1 → 0.5 → 0
-bool animationEnabled = true;
-bool morphEnabled = true;      // M 键切换：关时把表情权重全清零（回归基线用）
-bool morphDiagPrinted = false; // 首次有表情真正生效时打一条诊断
+
 // Stage 1 S1 物理总开关（P 键切换）。默认开（MMD 行为：物理常开）；
 // --ik-smoke 隔离验收时默认关，避免物理写回污染 IK 诊断读数。
 bool physicsEnabled = !ikSmoke;
+// Stage 1 S2 地面碰撞开关（G 键切换）。默认开（MMD 本体默认有地面碰撞）。
+bool groundCollisionEnabled = true;
 long applyTicksTotal = 0; int applyCount = 0; long applyTicksMax = 0;   // --anim-smoke 耗时统计
 
 window.Load += () =>
@@ -132,8 +121,6 @@ window.Load += () =>
     device = new GlesDevice(gl, size.X, size.Y);
     grid = new GlesGridRenderer(device);
 
-    Console.WriteLine($"[Demo] GL version : {gl.GetStringS(StringName.Version)}");
-    Console.WriteLine($"[Demo] GL renderer: {gl.GetStringS(StringName.Renderer)}");
     Console.WriteLine($"[Demo] 加载模型：{pmxPath}");
 
     model = GlesModelRenderer.LoadFromFile(device, pmxPath);
@@ -160,58 +147,18 @@ window.Load += () =>
         int dyn = rbDefs.Count(d => d.Type == RigidbodyType.Dynamic);
         int aligned = rbDefs.Count(d => d.Aligned);
         Console.WriteLine($"[Demo] 物理内核：刚体 {rbDefs.Length}（动态 {dyn} / mode2 对齐 {aligned}）| 关节 {jDefs.Length} | 内置地面（模型空间 y=0）");
-        Console.WriteLine("[Demo] 物理: P=开关（默认开；OFF→ON 自动 snap 到当前姿态，无跳变）");
     }
     catch (Exception ex)
     {
         Console.WriteLine($"[Demo] 物理初始化失败（本模型不接物理）：{ex.Message}");
     }
 
-    // ── 诊断输出 ────────────────────────────────────────────────────────
     var m = model.Model;
-    int opaque = 0, cutout = 0, blended = 0;
-    foreach (var s in m.Segments)
-    {
-        if (s.Type == MaterialRenderType.Opaque) opaque++;
-        else if (s.Type == MaterialRenderType.Cutout) cutout++;
-        else blended++;
-    }
-
-    Console.WriteLine($"[Demo] 顶点 {m.VertexCount} | 三角形 {m.IndexData.Length / 3} | 骨骼 {m.BoneCount} | 材质 {m.Segments.Length}");
-    Console.WriteLine($"[Demo] 队列分类：Opaque={opaque} Cutout={cutout} Blended={blended}");
-    int edgeCount = 0;
-    foreach (var seg in m.Segments) if (seg.EnableEdge) edgeCount++;
-    Console.WriteLine($"[Demo] 轮廓线：{edgeCount}/{m.Segments.Length} 个材质（按 E 开关）");
-    Console.WriteLine("[Demo] 自阴影：0=关 1=自阴影 2=自阴影+床影（默认 0）");
-    Console.WriteLine("[Demo] 光照深度图调试预览：按 Z 开关（全白=Z pass 无产出）");
-    Console.WriteLine($"[Demo] 蒙皮矩阵 {m.BoneCount * 64 / 1024.0:F1} KB → SSBO" +
-                      $"（UBO 最小保证仅 16 KB，这里必须用 SSBO）");
-    Console.WriteLine($"[Demo] 纹理库：{model.Textures.Count - 1} 张已加载");
-    Console.WriteLine($"[Demo] 表情（morph）：{m.MorphNames.Length} 条 | 顶点 {m.VertexMorphs.Length} / UV {m.UvMorphs.Length} / " +
-                      $"骨 {m.BoneMorphs.Length} / 材质 {m.MaterialMorphs.Count(e => e is not null)} / " +
-                      $"组 {m.GroupMorphs.Count(g => g is not null)}" +
-                      $" | 上 GPU：顶点 {(model.MorphEnabled ? "开" : "关（该模型无顶点 morph）")}" +
-                      $"/ UV {(model.MorphUvEnabled ? "开" : "关")}" +
-                      "（Flip/Impulse 按设计不支持，见 docs/2026-09-11-anim-morph-plan.md §0.2）");
-    Console.WriteLine($"[Demo] 包围盒 min={Fmt(m.BoundsMin)} max={Fmt(m.BoundsMax)} size={Fmt(m.BoundsSize)}");
 
     // ── 按包围盒定位相机 ────────────────────────────────────────────────
     camera.Target = m.BoundsCenter;
     camera.Radius = MathF.Max(m.BoundsSize.Y * 2.0f, m.BoundsSize.Length() * 1.1f);
     camera.Beta = MathF.PI / 2.2f;
-
-    // ── 骨骼测试目标：优先上半身 ────────────────────────────────────────
-    foreach (var name in new[] { "上半身", "上半身2", "首", "頭", "センター", "center" })
-    {
-        testBoneIndex = m.FindBone(name);
-        if (testBoneIndex >= 0)
-        {
-            Console.WriteLine($"[Demo] 蒙皮测试骨骼：#{testBoneIndex} \"{name}\"（按 B 切换）");
-            break;
-        }
-    }
-    if (testBoneIndex < 0)
-        Console.WriteLine("[Demo] 未找到常用骨骼名，按 B 将旋转 #0 骨骼");
 
     // ── VMD 动画（Step 5d-4：MmdTimeline 多层时间轴）───────────────────
     // 帧号驱动：渲染帧只推进游标，采样是帧号的纯函数 —— 跳帧 / seek / 暂停都不动采样逻辑。
@@ -250,16 +197,8 @@ window.Load += () =>
                 var expanded = MmdAnimation.FromVmd(vmd);
                 var bound = expanded.Bind(m);
                 var layer = timeline.AddLayer(new MmdAnimationLayer(bound));
-                baseLayers.Add((desc, file, layer));
                 loadedLayers++;
-
-                string slots = bound.BoneTracks.Length > 0 && bound.MorphTracks.Length > 0
-                    ? $"骨 {bound.BoneTracks.Length}/{expanded.BoneTracks.Length} + morph {bound.MorphTracks.Length}/{expanded.MorphTracks.Length}"
-                    : bound.BoneTracks.Length > 0
-                        ? $"骨 {bound.BoneTracks.Length}/{expanded.BoneTracks.Length}"
-                        : $"morph {bound.MorphTracks.Length}/{expanded.MorphTracks.Length}";
-                Console.WriteLine($"[Demo] 层 {loadedLayers}（{desc}）：{file} | 帧 {layer.ActiveStart:F0}..{layer.ActiveEnd:F0} | " +
-                                  $"{slots} | 表示枠键 {bound.PropertyKeyCount}");
+                Console.WriteLine($"[Demo] 动画层：{file}（{desc}）| 帧 {layer.ActiveStart:F0}..{layer.ActiveEnd:F0}");
                 if (bound.BoneTracks.Length == 0 && bound.MorphTracks.Length == 0)
                     Console.WriteLine($"[Demo]   ⚠ {file} 没有能与该模型匹配的轨道，此层不会有可见效果");
             }
@@ -273,13 +212,6 @@ window.Load += () =>
         {
             Console.WriteLine("[Demo] 没有任何可用的 VMD 层，动画不可用");
             timeline = null;
-            baseLayers.Clear();
-        }
-        else
-        {
-            Console.WriteLine($"[Demo] 时间轴：{loadedLayers} 层 | 区间 {timeline.StartFrame:F0}..{timeline.EndFrame:F0}（各层活跃区间并集）" +
-                              " | 空格暂停 ←/→单步 ↑/↓帧率");
-            Console.WriteLine("[Demo] 层管理：[=把 test1.vmd 导入当前帧 | ]=移除导入层 | ;=导入层权重 1/0.5/0 | '=层列表");
         }
     }
 
@@ -316,18 +248,7 @@ window.Load += () =>
             var target = model;
             if (target is null) return;
 
-            if (key == Keys.B)
-            {
-                int bone = testBoneIndex >= 0 ? testBoneIndex : 0;
-                poseApplied = !poseApplied;
-                target.Model.SetBoneLocalRotation(bone, poseApplied
-                    ? System.Numerics.Quaternion.CreateFromAxisAngle(
-                        System.Numerics.Vector3.UnitY, MathF.PI / 6f)   // 30°
-                    : System.Numerics.Quaternion.Identity);
-                string boneName = bone < target.Model.BoneNames.Length ? target.Model.BoneNames[bone] : "?";
-                Console.WriteLine($"[Demo] 姿势：{boneName} 旋转 {(poseApplied ? "30°" : "0°")}");
-            }
-            else if (key == Keys.E)
+            if (key == Keys.E)
             {
                 target.EdgeVisible = !target.EdgeVisible;
                 Console.WriteLine($"[Demo] 轮廓线：{(target.EdgeVisible ? "开" : "关")}");
@@ -340,12 +261,6 @@ window.Load += () =>
                 if (shadow != null)
                     shadow.Mode = (GlesShadowRenderer.ShadowMode)mode;
                 Console.WriteLine($"[Demo] 自阴影模式：{mode}（{(mode == 0 ? "关" : mode == 1 ? "自阴影" : "自阴影+床影")}）");
-            }
-            else if (key == Keys.R)
-            {
-                poseApplied = false;
-                target.Model.ResetPose();
-                Console.WriteLine("[Demo] 姿势已重置为绑定姿势");
             }
             else if (timeline != null && key == Keys.Space)
             {
@@ -367,116 +282,15 @@ window.Load += () =>
                 timeline.Seek(timeline.StartFrame);
                 Console.WriteLine($"[Demo] 时间轴帧：{timeline.CurrentFrame:F1}（首帧）");
             }
-            else if (timeline != null && key == Keys.LeftBracket)
+            else if (key == Keys.G)
             {
-                // 任意帧导入：把 test1.vmd 的第 0 帧落在时间轴当前位置（演示空白保留 + 区间并集 + 表示枠 AND）
-                if (importedLayer != null)
-                {
-                    Console.WriteLine($"[Demo] 已有导入层 {importedFile}（帧 {importedLayer.ActiveStart:F0} 起），按 ] 先移除");
-                }
-                else
-                {
-                    string? path = FindMotionFile("test1.vmd");
-                    if (path is null)
-                    {
-                        Console.WriteLine("[Demo] 未找到 Motion/test1.vmd，无法导入");
-                    }
-                    else
-                    {
-                        try
-                        {
-                            var vmd = VmdParser.Parse(File.ReadAllBytes(path));
-                            var bound = MmdAnimation.FromVmd(vmd).Bind(target.Model);
-                            importedFile = Path.GetFileName(path);
-                            importedWeight = 1f;
-                            importedLayer = timeline.AddLayer(new MmdAnimationLayer(bound) { Weight = importedWeight },
-                                importAt: timeline.CurrentFrame);
-                            Console.WriteLine($"[Demo] 导入 {importedFile}：第 0 帧落在时间轴 {timeline.CurrentFrame:F1} | " +
-                                              $"区间 {importedLayer.ActiveStart:F0}..{importedLayer.ActiveEnd:F0} | " +
-                                              $"表示枠键 {bound.PropertyKeyCount}（含非表示窗口，可观察 AND 合并）");
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[Demo] 导入失败：{ex.Message}");
-                        }
-                    }
-                }
-            }
-            else if (timeline != null && key == Keys.RightBracket)
-            {
-                if (importedLayer == null)
-                {
-                    Console.WriteLine("[Demo] 没有导入层可移除（按 [ 先导入）");
-                }
-                else if (timeline.RemoveLayer(importedLayer))
-                {
-                    // 下一帧 Apply：该层轨道自动回绑定姿势、表示枠投票解除（整体写回语义，无残留）
-                    Console.WriteLine($"[Demo] 已移除导入层 {importedFile}（区间缩为 {timeline.StartFrame:F0}..{timeline.EndFrame:F0}）");
-                    importedLayer = null;
-                    importedFile = "";
-                }
-            }
-            else if (timeline != null && key == Keys.Semicolon)
-            {
-                if (importedLayer == null)
-                {
-                    Console.WriteLine("[Demo] 没有导入层（按 [ 先导入）");
-                }
-                else
-                {
-                    importedWeight = importedWeight switch { 1f => 0.5f, 0.5f => 0f, _ => 1f };
-                    importedLayer.Weight = importedWeight;
-                    Console.WriteLine($"[Demo] {importedFile} 权重 → {importedWeight}" +
-                                      (importedWeight == 0f ? "（不贡献：该层轨道回绑定姿势）" : ""));
-                }
-            }
-            else if (timeline != null && key == Keys.Apostrophe)
-            {
-                Console.WriteLine($"[Demo] 层列表（区间 {timeline.StartFrame:F0}..{timeline.EndFrame:F0} | 游标 {timeline.CurrentFrame:F1} | 可见 {timeline.Mixer.Visible}）：");
-                foreach (var (desc, file, layer) in baseLayers)
-                    PrintLayer(desc, file, layer, timeline);
-                if (importedLayer != null)
-                    PrintLayer("导入", importedFile, importedLayer, timeline);
-            }
-            else if (key == Keys.M)
-            {
-                morphEnabled = !morphEnabled;
-                if (!morphEnabled) model?.Model.ResetMorphWeights();
-                int active = 0;
-                if (model != null)
-                    foreach (float weight in model.Model.MorphWeights)
-                        if (weight != 0f) active++;
-                Console.WriteLine($"[Demo] 表情驱动：{(morphEnabled ? "开" : "关")}" +
-                                  $" | 模型 {model?.Model.MorphNames.Length ?? 0} 条" +
-                                  $" | 当前活跃 {active} 条" +
-                                  $" | 本帧脏区顶点 {model?.MorphTouchedVertexCount ?? 0}");
+                groundCollisionEnabled = !groundCollisionEnabled;
+                Console.WriteLine($"[Demo] 地面碰撞：{(groundCollisionEnabled ? "开" : "关")}（S2；模型空间 y=0 内置地面，关闭后裙摆/发梢可穿地）");
             }
             else if (key == Keys.P)
             {
                 physicsEnabled = !physicsEnabled;
                 Console.WriteLine($"[Demo] 物理模拟：{(physicsEnabled ? "开" : "关")}（S1；OFF 期间骨骼保持纯动画，OFF→ON 自动 snap 无跳变）");
-            }
-            else if (key == Keys.V)
-            {
-                animationEnabled = !animationEnabled;
-                if (!animationEnabled)
-                {
-                    target.Model.ResetPose();
-                    target.Model.ResetMorphWeights();   // 表情也一并复位，避免残留
-                    target.Model.Visible = true;        // 表示枠也复位：否则停在隐藏窗口会一直看不见
-                }
-                Console.WriteLine($"[Demo] 动画驱动：{(animationEnabled ? "开" : "关（B/R 静态姿势测试可用）")}");
-            }
-            else if (key == Keys.Z)
-            {
-                if (debugView is null) return;
-                var v = debugView.Cycle();
-                string desc = v == GlesDebugOverlay.View.ZMap
-                    ? "光照深度图（应：模型轮廓可见、越近越暗；全白=该 pass 什么都没画）"
-                    : "关";
-                Console.WriteLine($"[Demo] 光照深度图预览：{desc}");
-                if (v == GlesDebugOverlay.View.ZMap && shadow != null && !shadow.Enabled)
-                    Console.WriteLine("[Demo]   提示：当前影模式为 0（关），Z 图不会被渲染 —— 按 1 或 2 打开");
             }
             else if (key == Keys.S)
             {
@@ -498,9 +312,9 @@ window.Load += () =>
         });
     }
 
-    Console.WriteLine("[Demo] 鼠标: 左键=旋转 | 右键=平移 | 滚轮=缩放 | B=弯曲测试 | E=轮廓线 | 1/2/0=自阴影 | S=影风格 | Z=中间RT预览 | R=重置");
-    Console.WriteLine("[Demo] 动画: 空格=暂停 | ←/→=∓1帧 | ↑/↓=帧率±6 | F=首帧 | [=导入VMD到当前帧 | ]=移除导入层 | ;=导入层权重 | '=层列表 | V=动画驱动开关 | M=表情驱动开关");
-    Console.WriteLine("[Demo] 物理: P=物理模拟开关（S1，默认开；裙/发/胸随动效摆动，关闭回纯动画）");
+    Console.WriteLine("[Demo] 操作: 左键=旋转 | 右键=平移 | 滚轮=缩放 | E=轮廓线 | 1/2/0=自阴影模式 | S=自阴影风格");
+    Console.WriteLine("[Demo] 播放: 空格=暂停/播放 | ←/→=∓1帧 | ↑/↓=帧率±6 | F=首帧");
+    Console.WriteLine("[Demo] 物理: P=物理模拟开关 | G=地面碰撞开关（均默认开）");
 
     if (smoke)
     {
@@ -522,7 +336,6 @@ string ikSmokeWorst = "-";
 string[] ikBakeNames = Array.Empty<string>();
 int[] ikBakeIdx = Array.Empty<int>();
 var ikBakeFrames = new List<(int F, System.Numerics.Quaternion[] Q, System.Numerics.Vector3[] P)>();
-bool animSmokeDiagPrinted = false;
 byte[]? smokeOn = null;        // 标准本影，影强度 1
 byte[]? smokeIsolated = null;  // 标准本影，影强度 0（cc≡0，隔离测试）
 byte[]? smokeHard = null;      // 硬边本影（阈值提取），影强度 1
@@ -579,13 +392,12 @@ window.Render += dt =>
         //   再由 PrepareFrame 重算世界/蒙皮矩阵并上传。影图 pass 与主渲染读同一份本帧姿态。
         // 里程碑 B（Step 5a-1）：采样只写「原始」表情权重，随后由 MmdMorphEvaluator 做 Group
         //   传播并把骨 morph 折进局部 T/R —— 必须早于 PrepareFrame 的 UpdateWorldMatrices。
-        if (timeline != null && animationEnabled)
+        if (timeline != null)
         {
             // --ik-smoke：按渲染帧号硬推进（不走 dt），保证导出帧可复现 —— 采样是帧号的纯函数，
             // 帧号必须由外部给定，否则同一"渲染帧 120"在不同机器/负载下落在不同动画帧上。
             if (ikSmoke) timeline.Seek(ikSmokeFrame - 1);
             else timeline.Advance(dt);
-            bool wasVisible = model.Model.Visible;
             var sw = System.Diagnostics.Stopwatch.StartNew();
             // Step 5d-4：时间轴推进 + 混合求值（活跃层采样 → 加权混合 → 可见性 AND → 整体写回）。
             // 采样是帧号的纯函数，seek ≡ 连续播放；未激活/已移除的层不贡献（空白保留、无残留）。
@@ -594,11 +406,6 @@ window.Render += dt =>
             applyTicksTotal += ticks;
             applyTicksMax = Math.Max(applyTicksMax, ticks);
             applyCount++;
-            if (timeline.Mixer.Visible != wasVisible)
-                Console.WriteLine($"[Demo] 表示枠：{(timeline.Mixer.Visible ? "显示" : "非表示")}（帧 {timeline.CurrentFrame:F1}）");
-            // M 键关掉表情驱动时把权重清零（VMD 的 morph 轨道不再生效）：
-            // 用于「权重全 0 ⇒ 画面与 Step 4 完全一致」的回归基线。
-            if (!morphEnabled) model.Model.ResetMorphWeights();
             MmdMorphEvaluator.Evaluate(model.Model);
         }
         // 阶段 0：帧首统一上传（重算蒙皮矩阵 + UBO + 蒙皮 SSBO），
@@ -611,6 +418,7 @@ window.Render += dt =>
             model.Physics.PlaybackFps = timeline?.PlaybackFps ?? 30f;
             model.PhysicsFrame = timeline?.CurrentFrame ?? 0;
             model.PhysicsEnabled = physicsEnabled;
+            model.GroundCollisionEnabled = groundCollisionEnabled;
         }
         model.PrepareFrame(in frame);
 
@@ -645,17 +453,6 @@ window.Render += dt =>
                 ps[b] = model.Model.WorldMatrices[bi].Translation;
             }
             ikBakeFrames.Add((ikSmokeFrame - 1, qs, ps));
-        }
-
-        // 表情管线首次真正动起来时打一条诊断（证明「权重 → 稀疏累加 → 脏区上传」是活的）。
-        if (!morphDiagPrinted && morphEnabled && model.MorphTouchedVertexCount > 0)
-        {
-            int active = 0;
-            foreach (float weight in model.Model.MorphWeights)
-                if (weight != 0f) active++;
-            Console.WriteLine($"[Demo] 表情首次激活：活跃 {active} 条 | 本帧脏区顶点 {model.MorphTouchedVertexCount} | " +
-                              $"顶点 morph 上传 {(model.MorphEnabled ? "开" : "关")}");
-            morphDiagPrinted = true;
         }
 
         // --anim-smoke：定期打印时间轴/混合器状态（帧游标 / 可见性 / 活跃 morph 数 / 中心骨姿态），
@@ -838,17 +635,6 @@ return 0;
         c[8], c[9], c[10], c[11],
         c[12], c[13], c[14], c[15]);
 
-static string Fmt(System.Numerics.Vector3 v) => $"({v.X:F1}, {v.Y:F1}, {v.Z:F1})";
-
-// ── ' 键用：打印一层的导入点 / 区间 / 权重 / 当前活跃性与表示枠 ──────────────
-static void PrintLayer(string desc, string file, MmdAnimationLayer layer, MmdTimeline timeline)
-{
-    double local = timeline.CurrentFrame - layer.Offset;
-    Console.WriteLine($"[Demo]   {desc}（{file}）| 导入帧 {layer.Offset:F0} | 区间 {layer.ActiveStart:F0}..{layer.ActiveEnd:F0}" +
-                      $" | 权重 {layer.Weight} | 当前{(layer.IsActive(timeline.CurrentFrame) ? "活跃" : "不活跃")}" +
-                      $" | 本地帧 {local:F1} | 该层表示枠 {(layer.IsVisibleAt(layer.Loop ? layer.ToLocal(timeline.CurrentFrame) : local) ? "显示" : "非表示")}");
-}
-
 // ── --smoke 用：读回默认帧缓冲，做校验和 / 差异统计 ──────────────────────
 // 自阴影的最终验收只能看"画面到底变了没有"：中间 RT 有数据 ≠ 主渲染用上了它
 // （sampler 没绑定、uv 取错、分支写错，都会让中间 RT 完好而画面毫无变化）。
@@ -888,7 +674,7 @@ static int CountDiff(byte[] a, byte[] b)
 
 static string? FindDefaultModel()
 {
-    const string Relative = "samples/MikuEngine.Demo/Model/1/1.pmx";
+    const string Relative = "samples/MikuEngine.Demo/Model/2/2.pmx";
 
     // 从输出目录往上找仓库根（bin/Debug/net10.0 → ... → 仓库根）
     var dir = new DirectoryInfo(AppContext.BaseDirectory);
