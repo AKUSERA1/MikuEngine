@@ -164,4 +164,58 @@ public static class Mat4
         output[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
         return true;
     }
+
+    /// <summary>
+    /// Extract the rotation block as a unit quaternion (xyzw) into q[qOffset..].
+    /// Branch-by-trace on the rotation diagonal; the intermediate arithmetic runs
+    /// in double because reze's JS numbers are float64 and the near-degenerate
+    /// branches lose unit length quickly in float32.（对照 reze math.ts
+    /// Mat4.toQuatFromArrayInto L1013-1050，hypot 归一化以 double 复算）
+    /// </summary>
+    public static void ToQuatInto(float[] m, int offset, float[] q, int qOffset)
+    {
+        // Column-major: m[col*4 + row].
+        double m00 = m[offset + 0], m01 = m[offset + 4], m02 = m[offset + 8];
+        double m10 = m[offset + 1], m11 = m[offset + 5], m12 = m[offset + 9];
+        double m20 = m[offset + 2], m21 = m[offset + 6], m22 = m[offset + 10];
+        double trace = m00 + m11 + m22;
+        double x = 0, y = 0, z = 0, w = 1;
+        if (trace > 0)
+        {
+            double s = System.Math.Sqrt(trace + 1.0) * 2;
+            w = 0.25 * s;
+            x = (m21 - m12) / s;
+            y = (m02 - m20) / s;
+            z = (m10 - m01) / s;
+        }
+        else if (m00 > m11 && m00 > m22)
+        {
+            double s = System.Math.Sqrt(1.0 + m00 - m11 - m22) * 2;
+            w = (m21 - m12) / s;
+            x = 0.25 * s;
+            y = (m01 + m10) / s;
+            z = (m02 + m20) / s;
+        }
+        else if (m11 > m22)
+        {
+            double s = System.Math.Sqrt(1.0 + m11 - m00 - m22) * 2;
+            w = (m02 - m20) / s;
+            x = (m01 + m10) / s;
+            y = 0.25 * s;
+            z = (m12 + m21) / s;
+        }
+        else
+        {
+            double s = System.Math.Sqrt(1.0 + m22 - m00 - m11) * 2;
+            w = (m10 - m01) / s;
+            x = (m02 + m20) / s;
+            y = (m12 + m21) / s;
+            z = 0.25 * s;
+        }
+        double invLen = 1 / System.Math.Sqrt(x * x + y * y + z * z + w * w);
+        q[qOffset + 0] = (float)(x * invLen);
+        q[qOffset + 1] = (float)(y * invLen);
+        q[qOffset + 2] = (float)(z * invLen);
+        q[qOffset + 3] = (float)(w * invLen);
+    }
 }
