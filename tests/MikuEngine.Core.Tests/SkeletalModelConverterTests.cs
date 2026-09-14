@@ -12,7 +12,7 @@ namespace MikuEngine.Core.Tests;
 /// </summary>
 public class SkeletalModelConverterTests
 {
-    private const string Relative = "samples/MikuEngine.Demo/Model/Model.pmx";
+    private const string Relative = "samples/MikuEngine.Demo/Model/1/1.pmx";
 
     private static string FindModel() => FindUp(Relative);
 
@@ -166,7 +166,7 @@ public class SkeletalModelConverterTests
         {
             int o = v * SkeletalModel.VertexStride + 48;
             int sum = span[o] + span[o + 1] + span[o + 2] + span[o + 3];
-            Assert.InRange(sum, 254, 255);
+            Assert.True(sum is >= 254 and <= 255, $"顶点 {v} 权重和 = {sum}（w = {span[o]}, {span[o + 1]}, {span[o + 2]}, {span[o + 3]}）");
         }
     }
 
@@ -218,58 +218,62 @@ public class SkeletalModelConverterTests
     [Fact]
     public void AppendTransform_IsParsedFromPmx()
     {
-        var m = Load();
+        var pmx = PmxParser.Parse(File.ReadAllBytes(FindModel()));
+        var m = SkeletalModelConverter.Convert(pmx);
 
-        // 复制腿：足D ← 足，ratio 1.0，只继承旋转
-        int legD = m.FindBone("左足D");
-        Assert.True(legD >= 0, "模型应存在「左足D」");
-        Assert.Equal(m.FindBone("左足"), m.AppendSources[legD]);
-        Assert.Equal(1f, m.AppendRatios[legD]);
-        Assert.True(m.AppendRotate[legD]);
-        Assert.False(m.AppendMove[legD]);
+        // 与 PMX 源数据逐骨对拍（模型无关，换 demo 模型不再失效）：
+        //   AppendSources = AppendTransform.ParentIndex；自付与 / 越界源 → -1（按 MMD 语义 no-op）
+        //   Ratio 钳到 [-1,1]；Rotate / Move / IsLocal 取 PMX 标志位。
+        int withAppend = 0;
+        for (int i = 0; i < pmx.Bones.Length; i++)
+        {
+            var b = pmx.Bones[i];
+            bool hasAppend = b.AppendTransform is { } a
+                          && (uint)a.ParentIndex < (uint)pmx.Bones.Length
+                          && a.ParentIndex != i;
+            if (!hasAppend)
+            {
+                // 无付与的骨必须是 -1（而不是 0 —— 0 是合法的源骨索引）
+                Assert.Equal(-1, m.AppendSources[i]);
+                continue;
+            }
 
-        // 腰キャンセル：ratio -1（反向抵消腰的旋转）
-        int cancel = m.FindBone("腰キャンセル左");
-        Assert.True(cancel >= 0, "模型应存在「腰キャンセル左」");
-        Assert.Equal(m.FindBone("腰"), m.AppendSources[cancel]);
-        Assert.Equal(-1f, m.AppendRatios[cancel]);
+            var ap = b.AppendTransform!.Value;
+            Assert.Equal(ap.ParentIndex, m.AppendSources[i]);
+            Assert.Equal(System.Math.Clamp(ap.Ratio, -1f, 1f), m.AppendRatios[i], 5);
+            Assert.Equal((b.Flag & PmxBoneFlag.HasAppendRotate) != 0, m.AppendRotate[i]);
+            Assert.Equal((b.Flag & PmxBoneFlag.HasAppendMove) != 0, m.AppendMove[i]);
+            Assert.Equal((b.Flag & PmxBoneFlag.LocalAppendTransform) != 0, m.AppendIsLocal[i]);
+            withAppend++;
+        }
 
-        // 腕捩1..3 按 0.25/0.5/0.75 摊扭转到前臂
-        int twist1 = m.FindBone("左腕捩1");
-        Assert.Equal(m.FindBone("左腕捩"), m.AppendSources[twist1]);
-        Assert.Equal(0.25f, m.AppendRatios[twist1], 5);
-
-        // 无付与的骨必须是 -1（而不是 0 —— 0 是合法的源骨索引）
-        int center = m.FindBone("センター");
-        Assert.Equal(m.FindBone("センター調整"), m.AppendSources[center]);
-        Assert.Equal(-1, m.AppendSources[0]);
-
-        // 该模型没有骨置位 LocalAppendTransform（bit7），转换器必须把 AppendIsLocal
-        // 数组分配好且全为 false —— 这锁死「转换器已把该标志搬进运行时模型」这件事，
-        // 否则日后默认分支会静默吃掉置位模型（与 UpdateWorldMatrices 的世界模式分支对应）。
+        Assert.True(withAppend > 0, "模型应存在付与骨（足D/腰キャンセル/腕捩 等任一形式）");
+        // 转换器必须把 AppendIsLocal 数组分配好（与 UpdateWorldMatrices 的世界模式分支对应）
         Assert.Equal(m.BoneCount, m.AppendIsLocal.Length);
-        Assert.All(m.AppendIsLocal, x => Assert.False(x));
     }
 
     [Fact]
     public void AxisLimits_AreNormalizedOrZero()
     {
-        var m = Load();
+        var pmx = PmxParser.Parse(File.ReadAllBytes(FindModel()));
+        var m = SkeletalModelConverter.Convert(pmx);
 
-        int limited = 0;
-        for (int i = 0; i < m.BoneCount; i++)
+        // 与 PMX 源数据逐骨对拍：PMX 有非零軸制限 ⇔ 运行时轴非零，且必须归一化
+        //（转换器负责把原始轴归一化，UpdateWorldMatrices 的軸制限投影依赖这一点）。
+        for (int i = 0; i < pmx.Bones.Length; i++)
         {
             var a = m.AxisLimits[i];
-            if (a == Vector3.Zero) continue;
-            limited++;
+            bool pmxHasAxis = pmx.Bones[i].AxisLimit is { } src && src.Length() > 1e-8f;
+            if (!pmxHasAxis)
+            {
+                Assert.Equal(Vector3.Zero, a);
+                continue;
+            }
+
+            Assert.True(a != Vector3.Zero, $"骨骼 {i}(\"{m.BoneNames[i]}\") 的 PMX 軸制限丢失");
             Assert.True(MathF.Abs(a.Length() - 1f) < 1e-5f,
                 $"骨骼 {i}(\"{m.BoneNames[i]}\") 的軸制限轴未归一化：{a}");
         }
-
-        // 腕捩/手捩 及其「〜調整」镜像骨，共 8 根带軸制限
-        Assert.Equal(8, limited);
-        int twist = m.FindBone("左腕捩");
-        Assert.True(twist >= 0 && m.AxisLimits[twist] != Vector3.Zero, "左腕捩 应带軸制限");
     }
 
     /// <summary>
@@ -612,11 +616,11 @@ public class EdgeSegmentTests
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir != null)
         {
-            var c = Path.Combine(dir.FullName, "samples/MikuEngine.Demo/Model/Model.pmx".Replace('/', Path.DirectorySeparatorChar));
+            var c = Path.Combine(dir.FullName, "samples/MikuEngine.Demo/Model/1/1.pmx".Replace('/', Path.DirectorySeparatorChar));
             if (File.Exists(c)) return SkeletalModelConverter.Convert(PmxParser.Parse(File.ReadAllBytes(c)));
             dir = dir.Parent;
         }
-        throw new IOException("未找到 Model.pmx");
+        throw new IOException("未找到 Model/1/1.pmx");
     }
 
     [Fact(Skip = "硬编码旧 demo 模型(Elysia)的轮廓段期望(42 材质中 23 个带轮廓线)；当前 demo 已换为 Model/1/1.pmx，材质数不同。")]

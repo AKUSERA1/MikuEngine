@@ -27,12 +27,16 @@ using MikuEngine.Engine;
 //   P    ：物理模拟开关（Stage 1 S1；裙/发/胸随动效摆动，OFF 回纯动画，OFF→ON 自动 snap）
 //   G    ：地面碰撞开关（Stage 1 S2；模型空间 y=0 内置地面，默认开）
 //   H    ：物理后付与开关（Stage 1 S3；付与链消费模拟结果，OFF 回物理前姿态，A/B 对照）
+//   IJKL/UO：模型面板 移動（Y/X/Z 世界轴，Shift 微调）| Alt+同键：面板 回転（YXZ 序 ±15°）
+//   ./,  ：モデル操作 拡大率（渲染层根矩阵，与物理解耦；Shift+, 只缩 Y 压纸片）| R：重置
 //
 // --smoke     ：无人值守自检。隐藏窗口跑 40 帧 → 强制开影模式 1 → 打印中间 RT 统计 → 退出。
 //               （跳过动画加载：自阴影/轮廓线这类多 pass 功能的"静默失效"没法靠肉眼看画面定位，
 //               靠这个把中间结果量化；动画会让模型动起来污染帧间差异统计）
 // --anim-smoke：无人值守播放验收。加载动效、隐藏窗口跑 90 帧、定期打印混合器状态后退出 ——
 //               验收标准是「全程无异常 + 各层确实在驱动模型」。
+// --xform-smoke：无人值守模型变换验收（MMD モデル操作端到端：TR 注入 全ての親 / 操作中心不动 /
+//               拡大率物理解耦 / 重置幂等）。
 // ─────────────────────────────────────────────────────────────────────────
 
 // --smoke：无人值守自检。隐藏窗口跑 40 帧 → 强制开影模式 1 → 打印中间 RT 统计 → 退出。
@@ -60,6 +64,12 @@ int ikSmokeFrames = 240;
     string? nArg = Array.Find(args, a => a.StartsWith("--ik-smoke=", StringComparison.Ordinal));
     if (nArg is not null && int.TryParse(nArg["--ik-smoke=".Length..], out int n)) ikSmokeFrames = n;
 }
+// --xform-smoke：无人值守模型变换验收（MMD モデル操作）。
+//   隐藏窗口跑 N 帧，验证端到端链路：
+//     ① 移動/回転 注入 全ての親 → センター 等子孙跟随、绕枢轴距离不变；操作中心原地不动；
+//     ② 拡大率 只进渲染层根矩阵 → 画面变化但 WorldMatrices（物理消费）逐位不变（物理解耦）；
+//     ③ 重置 → 画面回到基准（校验和一致）。
+bool xformSmoke = Array.Exists(args, a => a == "--xform-smoke");
 // --ik-bake-dump=<path>：随 --ik-smoke 逐动画帧记录「IK 相关骨的最终局部旋转」
 //   （= FinalRotations，已含 IK 叠加；与 MMD bake 语义一致），结束时写一份 JSON，
 //   供 tools/ik-oracle/cmp_baked.py 与 mmdbridge 烘焙出的 baked.vmd 逐帧对拍。
@@ -68,7 +78,7 @@ string? ikBakeDumpPath = null;
     string? bArg = Array.Find(args, a => a.StartsWith("--ik-bake-dump=", StringComparison.Ordinal));
     if (bArg is not null) ikBakeDumpPath = bArg["--ik-bake-dump=".Length..];
 }
-bool headless = smoke || animSmoke || ikSmoke;
+bool headless = smoke || animSmoke || ikSmoke || xformSmoke;
 string? pmxPath = Array.Find(args, a => !a.StartsWith("--", StringComparison.Ordinal)) ?? FindDefaultModel();
 if (pmxPath is null || !File.Exists(pmxPath))
 {
@@ -109,8 +119,9 @@ var input = new OrbitInputController(camera, enabled: true);
 MmdTimeline? timeline = null;
 
 // Stage 1 S1 物理总开关（P 键切换）。默认开（MMD 行为：物理常开）；
-// --ik-smoke 隔离验收时默认关，避免物理写回污染 IK 诊断读数。
-bool physicsEnabled = !ikSmoke;
+// --ik-smoke 隔离验收时默认关，避免物理写回污染 IK 诊断读数；
+// --xform-smoke 也默认关（保证校验和逐帧确定）。
+bool physicsEnabled = !ikSmoke && !xformSmoke;
 // Stage 1 S2 地面碰撞开关（G 键切换）。默认开（MMD 本体默认有地面碰撞）。
 bool groundCollisionEnabled = true;
 long applyTicksTotal = 0; int applyCount = 0; long applyTicksMax = 0;   // --anim-smoke 耗时统计
@@ -170,7 +181,7 @@ window.Load += () =>
     // 帧号驱动：渲染帧只推进游标，采样是帧号的纯函数 —— 跳帧 / seek / 暂停都不动采样逻辑。
     // smoke 模式跳过（自阴影 A/B 校验和比较的是相邻帧画面，动画会让模型动起来污染差异统计）；
     // --anim-smoke 反其道行之：专门为「多层播放无异常」的无人值守验收而设。
-    if (smoke && !animSmoke && !ikSmoke)
+    if ((smoke || xformSmoke) && !animSmoke && !ikSmoke)
     {
         Console.WriteLine("[Demo] --smoke：跳过 VMD 动画加载（避免污染自阴影帧间差异）");
     }
@@ -320,12 +331,76 @@ window.Load += () =>
                 };
                 Console.WriteLine($"[Demo] 自阴影风格：{name}");
             }
+            else if (key == Keys.R)
+            {
+                // 模型变换重置（R 键）：面板 TR / 拡大率 全部归零 / 归一
+                target.Model.ModelTranslationOffset = System.Numerics.Vector3.Zero;
+                target.Model.ModelRotationAngles = System.Numerics.Vector3.Zero;
+                target.ModelScale = System.Numerics.Vector3.One;
+                Console.WriteLine("[Demo] 模型变换重置：移動=0 | 回転=0 | 拡大率=1");
+            }
+            else
+            {
+                // ── 模型面板变换（MMD モデル操作）──────────────────────
+                //   移動：I/K=Y∓  J/L=X∓  U/O=Z∓（步长 0.5；Shift=±0.1 微调）
+                //   回転：Alt+I/K=X（俯仰）∓  Alt+J/L=Y（偏航）∓  Alt+U/O=Z（滚转）∓，±15°，
+                //         MMD YXZ 欧拉序，状态为绝对弧度（每帧由 ApplyModelTransform 重建，天然幂等）
+                //   拡大率： ./,=全体 ×1.1 / ÷1.1；Shift+,=只缩 Y 轴（压成纸片）
+                bool shift = (mods & Silk.NET.GLFW.KeyModifiers.Shift) != 0;
+                bool alt = (mods & Silk.NET.GLFW.KeyModifiers.Alt) != 0;
+                float moveStep = shift ? 0.1f : 0.5f;
+                float rotStep = MathF.PI / 12f;   // 15°
+                float scaleFactor = shift ? 1.05f : 1.1f;
+                var m2 = target.Model;
+                bool handled = false;
+
+                switch (key)
+                {
+                    // ── 移動（面板 移動，世界轴）──
+                    case Keys.J when !alt: m2.ModelTranslationOffset.X -= moveStep; handled = true; break;
+                    case Keys.L when !alt: m2.ModelTranslationOffset.X += moveStep; handled = true; break;
+                    case Keys.I when !alt: m2.ModelTranslationOffset.Y += moveStep; handled = true; break;
+                    case Keys.K when !alt: m2.ModelTranslationOffset.Y -= moveStep; handled = true; break;
+                    case Keys.U when !alt: m2.ModelTranslationOffset.Z -= moveStep; handled = true; break;
+                    case Keys.O when !alt: m2.ModelTranslationOffset.Z += moveStep; handled = true; break;
+
+                    // ── 回転（面板 回転，MMD YXZ 序）── Alt 修饰时对应轴 ∓15°
+                    case Keys.I when alt: m2.ModelRotationAngles.X -= rotStep; handled = true; break;
+                    case Keys.K when alt: m2.ModelRotationAngles.X += rotStep; handled = true; break;
+                    case Keys.J when alt: m2.ModelRotationAngles.Y -= rotStep; handled = true; break;
+                    case Keys.L when alt: m2.ModelRotationAngles.Y += rotStep; handled = true; break;
+                    case Keys.U when alt: m2.ModelRotationAngles.Z -= rotStep; handled = true; break;
+                    case Keys.O when alt: m2.ModelRotationAngles.Z += rotStep; handled = true; break;
+
+                    // ── 拡大率（与物理解耦，只进渲染层根矩阵）──
+                    case Keys.Period:          // .  = 放大全体
+                        target.ModelScale *= scaleFactor; handled = true; break;
+                    case Keys.Comma:           // ,  = 缩小全体
+                        target.ModelScale /= scaleFactor; handled = true; break;
+                    case Keys.Y when shift:    // Shift+Y = 只缩 Y 轴（压纸片测试）
+                        target.ModelScale = target.ModelScale with { Y = MathF.Max(target.ModelScale.Y / scaleFactor, 0.01f) };
+                        handled = true; break;
+                }
+
+                if (handled)
+                {
+                    var t = m2.ModelTranslationOffset; var r = m2.ModelRotationAngles; var s = target.ModelScale;
+                    Console.WriteLine($"[Demo] 模型变换：移動=({t.X:F2},{t.Y:F2},{t.Z:F2}) | " +
+                                      $"回転=({r.X * 180f / MathF.PI:F1}°,{r.Y * 180f / MathF.PI:F1}°,{r.Z * 180f / MathF.PI:F1}°) | " +
+                                      $"拡大率=({s.X:F2},{s.Y:F2},{s.Z:F2})");
+                }
+            }
         });
     }
 
     Console.WriteLine("[Demo] 操作: 左键=旋转 | 右键=平移 | 滚轮=缩放 | E=轮廓线 | 1/2/0=自阴影模式 | S=自阴影风格");
     Console.WriteLine("[Demo] 播放: 空格=暂停/播放 | ←/→=∓1帧 | ↑/↓=帧率±6 | F=首帧");
     Console.WriteLine("[Demo] 物理: P=物理模拟开关 | G=地面碰撞开关 | H=物理后付与开关（P/G 默认开）");
+    Console.WriteLine("[Demo] 模型变换（MMD モデル操作，全ての親 为基准，操作中心留在原地）:");
+    Console.WriteLine("[Demo]   移動: I/K=Y∓ | J/L=X∓ | U/O=Z∓（0.5/步，Shift=0.1 微调）");
+    Console.WriteLine("[Demo]   回転: Alt+I/K=X | Alt+J/L=Y | Alt+U/O=Z（∓15°/步，YXZ 序）");
+    Console.WriteLine("[Demo]   拡大率: .=放大 | ,=缩小（×1.1，Shift+,=只缩Y压纸片；与物理解耦）");
+    Console.WriteLine("[Demo]   R=重置全部模型变换");
 
     if (smoke)
     {
@@ -352,9 +427,16 @@ byte[]? smokeIsolated = null;  // 标准本影，影强度 0（cc≡0，隔离�
 byte[]? smokeHard = null;      // 硬边本影（阈值提取），影强度 1
 byte[]? smokeSoft = null;      // 普通阴影，影强度 1
 byte[]? smokeFloorOn = null;   // 影模式 2（含床影）
+
+// --xform-smoke 状态：基准/TR/拡大率 三份校验和 + 快照（见文件头验收项）
+int xformFrame = 0;
+long xformC0 = 0, xformC1 = 0, xformC2 = 0;
+System.Numerics.Matrix4x4[]? xformWorldTr = null;   // TR 注入后的 WorldMatrices 快照（拡大率不得改变它）
+System.Numerics.Vector3 xformOc0 = default, xformCenter0 = default;   // 操作中心 / センター 基准世界位置
 window.Render += dt =>
 {
     if (smoke && ++smokeFrame > 40) { window.Close(); return; }
+    if (xformSmoke && ++xformFrame > 12) { window.Close(); return; }
     if (ikSmoke && ++ikSmokeFrame > ikSmokeFrames)
     {
         Console.WriteLine($"[ik-smoke] 结束：{ikSmokeFrames} 帧 | 全程最大末端误差 {ikSmokeMaxErr:F4}（{ikSmokeWorst}）");
@@ -620,6 +702,84 @@ window.Render += dt =>
                         (d == 0 ? "  ❌ 床影完全看不到（被格网盖掉？）" : "  ✅ 床影画在地面上了"));
                 }
                 break;
+        }
+    }
+
+    // --xform-smoke：MMD モデル操作端到端验收（时序见各 case 注释）
+    if (xformSmoke && model != null)
+    {
+        var mm = model.Model;
+        switch (xformFrame)
+        {
+            case 2:  // 基准帧（恒等变换）：采校验和 + 骨骼基准位置，随后施加 TR（Y+30°，移動 (2,1,0)）
+            {
+                xformC0 = Checksum(ReadViewport(device!, w, h));
+                if (mm.OperationCenterBoneIndex >= 0)
+                    xformOc0 = mm.WorldMatrices[mm.OperationCenterBoneIndex].Translation;
+                int c = mm.FindBone("センター");
+                if (c >= 0) xformCenter0 = mm.WorldMatrices[c].Translation;
+                Console.WriteLine($"[xform-smoke] 基准：校验和 {xformC0} | 全ての親={(mm.RootTransformBoneIndex >= 0 ? mm.BoneNames[mm.RootTransformBoneIndex] : "无")}({mm.RootTransformBoneIndex}) | " +
+                                  $"操作中心={(mm.OperationCenterBoneIndex >= 0 ? $"{mm.BoneNames[mm.OperationCenterBoneIndex]}({mm.OperationCenterBoneIndex}) @ {xformOc0}" : "无")}");
+                mm.ModelRotationAngles = new System.Numerics.Vector3(0f, 30f * MathF.PI / 180f, 0f);
+                mm.ModelTranslationOffset = new System.Numerics.Vector3(2f, 1f, 0f);
+                break;
+            }
+
+            case 3:  // TR 生效帧：画面变化 / 操作中心不动 / 子孙绕枢轴旋转 / 世界轴平移
+            {
+                xformC1 = Checksum(ReadViewport(device!, w, h));
+                bool pictureChanged = xformC1 != xformC0;
+                bool ocFixed = mm.OperationCenterBoneIndex < 0 ||
+                    System.Numerics.Vector3.Distance(mm.WorldMatrices[mm.OperationCenterBoneIndex].Translation, xformOc0) < 1e-4f;
+
+                int c = mm.FindBone("センター");
+                bool subtreeMoved = c >= 0 &&
+                    System.Numerics.Vector3.Distance(mm.WorldMatrices[c].Translation, xformCenter0) > 1f;
+                // |v' - (pivot+t)| == |v - pivot|：旋转绕枢轴 + 世界轴平移的几何不变量
+                float dist0 = 0, dist1 = 0;
+                if (c >= 0 && mm.RootTransformBoneIndex >= 0 &&
+                    System.Numerics.Matrix4x4.Invert(mm.InverseBind[mm.RootTransformBoneIndex], out var bindWorld))
+                {
+                    var pivot = bindWorld.Translation;
+                    dist0 = (xformCenter0 - pivot).Length();
+                    dist1 = (mm.WorldMatrices[c].Translation - (pivot + mm.ModelTranslationOffset)).Length();
+                }
+                bool distKept = MathF.Abs(dist0 - dist1) < 1e-3f;
+
+                xformWorldTr = (System.Numerics.Matrix4x4[])mm.WorldMatrices.Clone();
+                Console.WriteLine($"[xform-smoke] A) TR 注入 全ての親：画面变化={(pictureChanged ? "✅" : "❌")} | " +
+                                  $"操作中心不动={(ocFixed ? "✅" : "❌")} | 子孙跟随旋转={(subtreeMoved ? "✅" : "❌")} | " +
+                                  $"枢轴距离不变 {dist0:F3} vs {dist1:F3}{(distKept ? " ✅" : " ❌")}");
+                // 拡大率：非均匀（压纸片方向）——必须只影响渲染，不碰 WorldMatrices
+                model.ModelScale = new System.Numerics.Vector3(1.2f, 0.3f, 1.0f);
+                break;
+            }
+
+            case 4:  // 拡大率生效帧：画面变化（视觉缩放）+ WorldMatrices 逐位不变（物理解耦）
+            {
+                xformC2 = Checksum(ReadViewport(device!, w, h));
+                bool pictureChanged = xformC2 != xformC1;
+                bool worldUntouched = xformWorldTr != null &&
+                    xformWorldTr.AsSpan().SequenceEqual(mm.WorldMatrices.AsSpan());
+                Console.WriteLine($"[xform-smoke] B) 拡大率 (1.2,0.3,1.0)：画面变化={(pictureChanged ? "✅" : "❌")} | " +
+                                  $"WorldMatrices 逐位不变（物理/IK 不受影响）={(worldUntouched ? "✅" : "❌")}");
+                break;
+            }
+
+            case 6:  // 重置（模拟 R 键）
+            {
+                mm.ModelTranslationOffset = System.Numerics.Vector3.Zero;
+                mm.ModelRotationAngles = System.Numerics.Vector3.Zero;
+                model.ModelScale = System.Numerics.Vector3.One;
+                break;
+            }
+
+            case 7:  // 重置生效帧：画面必须回到基准校验和（幂等 / 无残留）
+            {
+                long c3 = Checksum(ReadViewport(device!, w, h));
+                Console.WriteLine($"[xform-smoke] C) 重置回基准：{(c3 == xformC0 ? "✅ 校验和一致（无残留）" : $"❌ {c3} ≠ {xformC0}")}");
+                break;
+            }
         }
     }
 };

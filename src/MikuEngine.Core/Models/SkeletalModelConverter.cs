@@ -28,6 +28,7 @@ public static class SkeletalModelConverter
         BuildSegments(pmx, model);
         BuildMorphs(pmx, model);
 
+        model.ResolveModelTransformBones();   // 全ての親 / 操作中心（模型面板变换的载体与锚点）
         model.ResetPose();
         return model;
     }
@@ -293,22 +294,19 @@ public static class SkeletalModelConverter
             for (int i = 0; i < 4; i++)
                 fw[i] /= sum;
 
-        // 找到最后一个非零槽，把余数塞给它，保证四槽字节和恒为 255
-        // （否则 0.5/0.5 会四舍五入成 128+128=256）
-        int last = 0;
-        for (int i = 0; i < 4; i++)
-            if (fw[i] > 1e-6f)
-                last = i;
-
+        // 先逐槽四舍五入，再把和的残差塞给【最大槽】，保证四槽字节和恒为 255。
+        // （曾塞给"最后一个非零槽"：当小槽各自 +0.5 的舍入累积把前面槽的和顶过 255 时，
+        //   255-acc 为负被 Clamp 成 0，总和变 256 —— 实测 1/1.pmx 顶点 54 (176,78,2,0)。
+        //   残差必须由最大槽吸收：max+delta ≤ 255 数学上恒成立（delta = 255-Σ ≤ 255-max）。）
         Span<byte> b = stackalloc byte[4];
-        int acc = 0;
+        int acc = 0, maxIdx = 0;
         for (int i = 0; i < 4; i++)
         {
-            if (i == last) continue;
             b[i] = ToWeightByte(fw[i]);
             acc += b[i];
+            if (b[i] > b[maxIdx]) maxIdx = i;
         }
-        b[last] = (byte)System.Math.Clamp(255 - acc, 0, 255);
+        b[maxIdx] = (byte)System.Math.Clamp(b[maxIdx] + 255 - acc, 0, 255);
 
         w0 = b[0]; w1 = b[1]; w2 = b[2]; w3 = b[3];
     }

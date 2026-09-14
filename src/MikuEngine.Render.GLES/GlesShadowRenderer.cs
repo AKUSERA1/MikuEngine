@@ -321,6 +321,8 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         gl.UseProgram(_zProg);
         BindCommon(_zProg);
         gl.Uniform1(U(_zProg, "uSkinMatBase"), (float)baseOffset);
+        // 渲染层根矩阵（拡大率 / 无 全ての親 时的 TR 兜底）：与主渲染同一份，影子跟随视觉模型
+        GlesMatrixUpload.Mat4(gl, U(_zProg, "uModelRoot"), model.ModelRootMatrix);
         // 顶点 morph：Z pass 与主渲染共用同一份偏移，否则表情变形后影子会对不上。
         gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, 2, model.MorphSsbo);
         gl.Uniform1(U(_zProg, "uMorphEnabled"), model.MorphEnabled ? 1f : 0f);

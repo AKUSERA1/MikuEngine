@@ -57,6 +57,8 @@ uniform vec4  uMaterialSpecular;
 uniform float uMaterialShininess;
 uniform vec4  uMaterialAmbient;
 uniform float uNormalOffset;     // 法线偏移偏置（世界单位；demo 按 1.5×世界texel 接线）
+uniform mat4  uModelRoot;        // 渲染层根矩阵：MMD 拡大率（+ 无 全ての親 时的 TR 兜底），蒙皮后整体施加
+uniform mat3  uModelNormalRoot;  // = Root 线性部分⁻ᵀ（引擎侧算好上传）；非均匀缩放的法线方向修正
 
 layout(location = 0) in vec3  aPosition;
 layout(location = 1) in vec3  aNormal;
@@ -106,7 +108,11 @@ void main()
         sn = mat3(m) * aNormal;
     }
 
-    vec3 nWorld = normalize(sn);
+    // 渲染层根变换（MMD 拡大率）：蒙皮之后整体施加 —— 物理/IK/付与运行在 bind 尺度，
+    // 缩放只影响视觉。非均匀缩放（压成纸片）不经过蒙皮链，因此不产生剪切。
+    // 法线用逆轉置修正（普通矩阵变换法线在非均匀缩放下方向是错的），随后归一化。
+    sp = uModelRoot * sp;
+    vec3 nWorld = normalize(uModelNormalRoot * sn);
     vec3 pw = sp.xyz;
 
     // ── PhongColor（PE L291-307）────────────────────────────────────────

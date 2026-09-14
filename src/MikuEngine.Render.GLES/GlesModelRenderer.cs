@@ -100,8 +100,23 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     private readonly int _locShadowZMap, _locShadowTexel, _locSelfShadowStrength;
     private readonly int _locShadowStyle, _locShadowColor, _locShadowBias, _locShadowBiasMax, _locShadowSlopeBias, _locShadowSoftness, _locShadowEdge;
     private readonly int _locNormalOffset;
+    private readonly int _locModelRoot, _locModelNormalRoot;    // 渲染层根矩阵（拡大率 / 无载体 TR 兜底）
+    private readonly int _locEdgeModelRoot;
+
+    private Matrix4x4 _rootMatrix = Matrix4x4.Identity;         // 蒙皮之后整体施加（MMD 拡大率）
+    private Matrix4x4 _rootNormal = Matrix4x4.Identity;         // = Root⁻ᵀ 的线性 3x3（非均匀缩放的法线修正）
 
     public Core.Models.SkeletalModel Model => _model;
+
+    /// <summary>
+    /// モデル操作「拡大率」（MMD 模型面板的 X/Y/Z 独立缩放）。**与物理解耦**：
+    /// 只进渲染层根矩阵（蒙皮之后整体施加），骨骼 / 刚体 / IK / 付与 全部保持 bind 尺度 ——
+    /// 模型可以被压成纸片或放大成巨人，物理模拟照常。默认 (1,1,1)。
+    /// </summary>
+    public Vector3 ModelScale { get; set; } = Vector3.One;
+
+    /// <summary>本帧的渲染层根矩阵（<see cref="PrepareFrame"/> 里算好；影图 pass 复用同一份）。</summary>
+    public Matrix4x4 ModelRootMatrix => _rootMatrix;
 
     /// <summary>轮廓线开关（对应 PmxEditor 的 chkEdge）。默认开。</summary>
     public bool EdgeVisible { get; set; } = true;
@@ -233,6 +248,8 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         _locShadowSoftness = gl.GetUniformLocation(_program, "uShadowSoftness");
         _locShadowEdge = gl.GetUniformLocation(_program, "uShadowEdge");
         _locNormalOffset = gl.GetUniformLocation(_program, "uNormalOffset");
+        _locModelRoot = gl.GetUniformLocation(_program, "uModelRoot");
+        _locModelNormalRoot = gl.GetUniformLocation(_program, "uModelNormalRoot");
         _locDiffuseTex = gl.GetUniformLocation(_program, "uDiffuseTex");
         _locSphereTex = gl.GetUniformLocation(_program, "uSphereTex");
         _locToonTex = gl.GetUniformLocation(_program, "uToonTex");
@@ -259,6 +276,8 @@ public sealed unsafe class GlesModelRenderer : IDisposable
             ("uShadowSoftness", _locShadowSoftness),
             ("uShadowEdge", _locShadowEdge),
             ("uNormalOffset", _locNormalOffset),
+            ("uModelRoot", _locModelRoot),
+            ("uModelNormalRoot", _locModelNormalRoot),
             ("uDiffuseTex", _locDiffuseTex), ("uSphereTex", _locSphereTex),
             ("uToonTex", _locToonTex),
             ("uTextureCoeff", _locTextureCoeff), ("uSphereCoeff", _locSphereCoeff),
@@ -277,12 +296,14 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         _locEdgeColor = gl.GetUniformLocation(_edgeProgram, "uMaterialEdgeColor");
         _locEdgeSize = gl.GetUniformLocation(_edgeProgram, "uMaterialEdgeSize");
         _locEdgeMorphEnabled = gl.GetUniformLocation(_edgeProgram, "uMorphEnabled");
+        _locEdgeModelRoot = gl.GetUniformLocation(_edgeProgram, "uModelRoot");
         foreach (var (name, loc) in new (string, int)[]
         {
             ("uSkinMatBase", _locEdgeSkinMatBase),
             ("uMaterialEdgeColor", _locEdgeColor),
             ("uMaterialEdgeSize", _locEdgeSize),
             ("uMorphEnabled", _locEdgeMorphEnabled),
+            ("uModelRoot", _locEdgeModelRoot),
         })
         {
             if (loc < 0)
@@ -515,6 +536,16 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         // 都读这一份，保证同帧内三个 pass 的可见性判定一致。
         ModelVisible = _model.Visible;
 
+        // 模型面板变换（MMD モデル操作）：
+        //   ① 移動/回転 → 全ての親 世界矩阵后乘因子（ApplyModelTransform 只重建因子，
+        //      注入发生在 RecomputeBone）—— 必须先于 IK/FK/物理，随后它们全部自动跟随；
+        //   ② 拡大率 → 渲染层根矩阵（蒙皮后整体施加，与物理解耦）+ 法线修正矩阵。
+        _model.ApplyModelTransform();
+        _rootMatrix = Core.Math.ModelRootTransform.ComputeRootMatrix(
+            _model.RootTransformBoneIndex >= 0,
+            _model.ModelTranslationOffset, _model.ModelRotationAngles, ModelScale);
+        _rootNormal = Core.Math.ModelRootTransform.ComputeNormalMatrix(_rootMatrix);
+
         // IK 求解：必须早于世界矩阵重算 —— 求解器内部先跑一次 FK 全量更新（拿到被驱动端/目标的世界
         // 坐标）并导出链骨基旋转，迭代中只在链骨子树增量重算，最终把结果写进 IkRotations；
         // 下面这次 UpdateWorldMatrices 才把 IK 折进世界/蒙皮矩阵。顺序与 PmxEditor 的
@@ -553,6 +584,11 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         gl.BindBufferBase(BufferTargetARB.UniformBuffer, 0, _frameUbo);
         _skin.Bind(1);
         gl.Uniform1(_locSkinMatBase, (float)SkinMatrixBaseOffset);
+
+        // 渲染层根矩阵（MMD 拡大率 / 无 全ての親 时的 TR 兜底）：蒙皮后整体施加；
+        // 法线用逆轉置 3x3 修正（非均匀缩放下普通矩阵变换法线方向是错的）。
+        GlesMatrixUpload.Mat4(gl, _locModelRoot, _rootMatrix);
+        GlesMatrixUpload.Mat3(gl, _locModelNormalRoot, _rootNormal);
 
         // 顶点 morph：偏移 SSBO 绑 binding 2，并用 uMorphEnabled 区分「模型无顶点 morph」
         // （此时缓冲里全是 0，但 shader 干脆不读）。
@@ -670,6 +706,8 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         var gl = _device.Gl;
         gl.UseProgram(_edgeProgram);
         gl.Uniform1(_locEdgeSkinMatBase, (float)SkinMatrixBaseOffset);
+        // 外扩壳与本体用同一份根矩阵 —— 拡大率下轮廓线厚度/方向随模型一起缩放
+        GlesMatrixUpload.Mat4(gl, _locEdgeModelRoot, _rootMatrix);
         // 轮廓线必须用与主渲染同一份顶点 morph 偏移，否则外扩壳会与本体错位。
         _morph.Bind(2);
         gl.Uniform1(_locEdgeMorphEnabled, _hasVertexMorph ? 1f : 0f);
@@ -740,5 +778,39 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         _morph.Dispose();
         _morphUv.Dispose();
         _textures.Dispose();
+    }
+}
+
+/// <summary>
+/// System.Numerics（行主序 row-vector）矩阵 → GLSL uniform 的上传助手。
+/// 约定与 FrameUniforms 的 UBO 一致：引擎矩阵的 16 个 floats **原样**喂给
+/// <c>glUniformMatrix4fv(transpose=false)</c>，GLSL 把它们按列主序解释 ⇒ shader 拿到的
+/// 是引擎矩阵的转置，而 GLSL 的 <c>M * v</c>（列向量）与引擎的 <c>v * M</c>（行向量）
+/// 是同一线性映射 —— 两条约定在此抵消，调用方不需要手动转置。
+/// mat3 同理（法线修正矩阵走同一约定）。
+/// </summary>
+internal static class GlesMatrixUpload
+{
+    public static unsafe void Mat4(GL gl, int location, in Matrix4x4 m)
+    {
+        float* p = stackalloc float[16]
+        {
+            m.M11, m.M12, m.M13, m.M14,
+            m.M21, m.M22, m.M23, m.M24,
+            m.M31, m.M32, m.M33, m.M34,
+            m.M41, m.M42, m.M43, m.M44,
+        };
+        gl.UniformMatrix4(location, 1, false, p);
+    }
+
+    public static unsafe void Mat3(GL gl, int location, in Matrix4x4 m)
+    {
+        float* p = stackalloc float[9]
+        {
+            m.M11, m.M12, m.M13,
+            m.M21, m.M22, m.M23,
+            m.M31, m.M32, m.M33,
+        };
+        gl.UniformMatrix3(location, 1, false, p);
     }
 }

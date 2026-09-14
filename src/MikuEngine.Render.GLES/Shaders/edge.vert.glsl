@@ -44,6 +44,7 @@ uniform float uSkinMatBase;
 uniform float uMorphEnabled;       // 0 = 模型无顶点 morph
 uniform vec4  uMaterialEdgeColor;
 uniform float uMaterialEdgeSize;   // PMX 材质的 EdgeSize
+uniform mat4  uModelRoot;          // 渲染层根矩阵（拡大率 / 无 全ての親 时的 TR 兜底）
 
 layout(location = 0) in vec3  aPosition;
 layout(location = 1) in vec3  aNormal;
@@ -89,11 +90,14 @@ void main()
     // ── Edge 外推（PE VS1_Edge L595-600）─────────────────────────────
     // OffsetMul/OffsetAdd_EdgeSize 是 Material Morph 的产物，v1 无 morph，恒为 1 / 0
     float h  = ((aUv.z * uMaterialEdgeSize) * 1.0 + 0.0) * 0.015;   // BaseEdgeValue = 0.015
-    float d  = distance(uFrame.uCameraPosition.xyz, sp.xyz) * 0.1;  // BaseDistanceInv = 0.1
+    // 根变换（MMD 拡大率）：距离按【变换后】位置取（远处轮廓线自然变细），
+    // 外扩壳整体（位置 + 偏移）再过根矩阵 ⇒ 轮廓线厚度随模型缩放、压扁方向随之压扁。
+    vec3 rootPos = (uModelRoot * vec4(sp.xyz, 1.0)).xyz;
+    float d  = distance(uFrame.uCameraPosition.xyz, rootPos) * 0.1;  // BaseDistanceInv = 0.1
     float cf = sqrt(d);
     vec3 offset = cf * h * n;
 
-    vec4 p2 = vec4(sp.xyz + offset, 1.0);
+    vec4 p2 = uModelRoot * vec4(sp.xyz + offset, 1.0);
     gl_Position = uFrame.uViewProj * p2;
 
     vColor = uMaterialEdgeColor;   // 含 EdgeColor.w（PE 的 Edge 自身 alpha）

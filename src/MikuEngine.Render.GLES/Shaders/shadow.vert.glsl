@@ -27,6 +27,7 @@ layout(std430, binding = 2) buffer MorphBlock { vec4 uMorphOffsets[]; };
 
 uniform float uSkinMatBase;
 uniform float uMorphEnabled;     // 0 = 模型无顶点 morph
+uniform mat4  uModelRoot;        // 渲染层根矩阵（拡大率 / 无 全ての親 时的 TR 兜底）
 
 layout(location = 0) in vec3  aPosition;
 layout(location = 1) in vec3  aNormal;
@@ -57,5 +58,7 @@ void main()
     }
 
     vUv = aUv.xy;
+    // 根变换（MMD 拡大率）：影子跟随视觉模型 —— 物理跑在 bind 尺度，此处只影响视觉
+    sp = uModelRoot * sp;
     gl_Position = uFrame.uLightViewProj * sp;
 }

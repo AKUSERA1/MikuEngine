@@ -1,4 +1,5 @@
 using System.Numerics;
+using MikuEngine.Core.Math;
 
 namespace MikuEngine.Core.Models;
 
@@ -307,6 +308,78 @@ public sealed class SkeletalModel
             MorphWeights[i] = 0f;
     }
 
+    // ── 模型面板变换（MMD モデル操作）────────────────────────────────────
+    //
+    // MMD 语义（对 TestModels 两套标准模型实测 + 社区资料互证）：
+    //   * 全ての親 与 操作中心 是**并列的根骨**（互不隶属），身体挂在 全ての親 之下；
+    //   * 模型面板的 移動/回転 作用于 全ての親（登録时烘焙为其关键帧）——因此物理刚体
+    //     （kinematic 目标取骨世界矩阵）与 IK（内部跑全量 FK）都随之跟随，与 MMD 一致；
+    //   * 操作中心 不在变形链上（视点追踪的锚点）——只要变换只施加在 全ての親 上，
+    //     它天然「始终留在原地」，无需任何特殊处理；
+    //   * 拡大率（缩放）**不在此处**：它由渲染层在蒙皮之后整体施加（见 GlesModelRenderer），
+    //     保证非均匀缩放（压成纸片）不污染刚体 / teleport 阈值 / 付与 / IK——物理解耦。
+    //
+    // 注入方式：不写 LocalTranslations/LocalRotations（会与 VMD 轨道、ResetPose 互相污染、
+    // 且需要逐帧重算），而是作为 全ての親 世界矩阵的**后乘因子 D** 在 RecomputeBone 里施加：
+    //   D = T(-pivot) · R · T(pivot + move)
+    // 即「把模型平回枢轴 → 绕枢轴旋转 → 放回并叠加世界轴平移」。pivot 取 全ての親 的
+    // 绑定姿势世界位置（标准模型 = 原点，此时 D = R · T(move)，与 MMD 的 S·R·T 语义对齐）。
+    // 状态是**绝对值**（面板显示值），每帧从 D 重建，天然幂等、可随时归零、与动画共存。
+
+    /// <summary>面板「移動」偏移（模型空间，世界轴向）。绝对值，0 = 无偏移。</summary>
+    public Vector3 ModelTranslationOffset;
+
+    /// <summary>面板「回転」角（弧度，MMD 的 YXZ 欧拉序，见 <see cref="MmdMath.EulerOrderYxz"/>）。绝对值。</summary>
+    public Vector3 ModelRotationAngles;
+
+    /// <summary>全ての親 骨骼索引（面板变换载体），-1 = 模型没有此骨（此时面板 TR 由渲染层根矩阵兜底）。</summary>
+    public int RootTransformBoneIndex { get; private set; } = -1;
+
+    /// <summary>操作中心 骨骼索引（视点/相机锚点，**不参与**任何模型变换），-1 = 无。</summary>
+    public int OperationCenterBoneIndex { get; private set; } = -1;
+
+    /// <summary>全ての親 世界矩阵的后乘因子；无载体骨时恒为单位阵。</summary>
+    private Matrix4x4 _panelMatrix = Matrix4x4.Identity;
+    private int _panelCarrier = -1;
+
+    /// <summary>加载后调用一次：按名字定位 全ての親 / 操作中心。</summary>
+    public void ResolveModelTransformBones()
+    {
+        RootTransformBoneIndex = FindBone("全ての親");
+        OperationCenterBoneIndex = FindBone("操作中心");
+    }
+
+    /// <summary>
+    /// 根据当前面板状态重建 全ての親 世界矩阵的后乘因子。每帧在 FK 之前调用一次即可
+    /// （<see cref="RecomputeBone"/> 会把它乘进 全ての親 的世界矩阵，子孙随之继承）。
+    /// </summary>
+    public void ApplyModelTransform()
+    {
+        _panelCarrier = RootTransformBoneIndex;
+        if (_panelCarrier < 0 || (uint)_panelCarrier >= (uint)BoneCount)
+        {
+            _panelCarrier = -1;
+            _panelMatrix = Matrix4x4.Identity;
+            return;
+        }
+
+        // MMD 回転是 YXZ 欧拉序（MmdMath.QuaternionFromYxzEuler 即 CreateFromYawPitchRoll）
+        Quaternion r = MmdMath.QuaternionFromYxzEuler(
+            ModelRotationAngles.Y, ModelRotationAngles.X, ModelRotationAngles.Z);
+        Matrix4x4 rot = Matrix4x4.CreateFromQuaternion(r);
+
+        // 旋转枢轴 = 全ての親 的绑定姿势世界位置。取 InverseBind 的逆的平移分量，
+        // 比读 LocalPositions 更稳（父链非单位阵时依旧正确）。标准模型 = 原点。
+        Vector3 pivot = Vector3.Zero;
+        if (Matrix4x4.Invert(InverseBind[_panelCarrier], out Matrix4x4 bindWorld))
+            pivot = bindWorld.Translation;
+
+        // 行主序 row-vector：v · T(-pivot) · R · T(pivot+move)
+        //   = ((v - pivot) 绕枢轴旋转 R) + pivot + move
+        _panelMatrix = Matrix4x4.CreateTranslation(-pivot) * rot
+                     * Matrix4x4.CreateTranslation(pivot + ModelTranslationOffset);
+    }
+
     /// <summary>
     /// 由当前局部 T/R 重算世界矩阵与蒙皮矩阵。按 <see cref="DeformOrder"/> 遍历保证
     /// 「父先于子」且「付与源先于付与目标」。本方法<b>幂等</b>：付与/軸制限的中间结果只写暂存数组，
@@ -553,6 +626,14 @@ public sealed class SkeletalModel
 
         int parent = ParentIndices[i];
         WorldMatrices[i] = parent >= 0 ? local * WorldMatrices[parent] : local;
+
+        // 模型面板变换（MMD 移動/回転）：作为 全ての親 世界矩阵的后乘因子注入（见
+        // ApplyModelTransform 的说明）。每次都从「局部 × 父级」重新构建再后乘 ⇒ 天然幂等，
+        // 不会累积；IK 内部跑全量 FK、物理读 WorldMatrices，都自动跟随，操作中心不在
+        // 全ての親 子树内，因此始终留在原地。
+        if (i == _panelCarrier)
+            WorldMatrices[i] *= _panelMatrix;
+
         SkinMatrices[i] = InverseBind[i] * WorldMatrices[i];
     }
 
