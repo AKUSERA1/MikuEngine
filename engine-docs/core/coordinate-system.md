@@ -93,6 +93,9 @@ GLSL 按列主序解释这 16 个 float ⇒ shader 拿到的是引擎矩阵的**
 > 两者最终在 GLSL 侧都得到正确的变换。真正的禁忌是「对已经是转置表示的存储再重排一次」
 > —— 那会把矩阵转两次：平移丢失进 `w`、旋转反向，蒙皮炸成薄片
 > （物理内核的列主序/行主序转换同样遵守这条，见 `MMDPhysics.CopyMatricesToColumnMajor`）。
+> 渲染层每帧的骨骼矩阵往返**不再调用**这两个 helper，而是用 `MemoryMarshal.Cast<Matrix4x4,float>`
+> 走 64 B 块拷贝（`Matrix4x4` 的字段声明序恰等于内存序，启动自检不通过则退回 helper）——
+> 同一条「16 float 线性直拷」规则，只是不再逐字段标量写。
 
 ### 3.3 列主序矩阵乘法
 

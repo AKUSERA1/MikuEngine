@@ -132,7 +132,7 @@ model.UpdateWorldMatrices();              // 按 DeformOrder（拓扑序）重�
 | `AxisLimits` | 軸制限轴（已归一化，`Zero` = 无限制） |
 | `IkChains` / `IsIkLink` / `IkRotations` / `IkLinkBaseRotations` / `IkEnabled` / `IkSolverEnabled` | IK（见 [ik.md](animation/ik.md)） |
 | `FinalRotations` / `FinalTranslations` | 最近一次求值的「付与 + IK 之后」有效局部变换（只读快照，不回写 `Local*`） |
-| `UpdateWorldMatricesSubtree(bone)` | 只重算某骨及其全部后代（IK 迭代内的增量刷新） |
+| `UpdateWorldMatricesSubtree(bone)` | 只重算某骨及其全部后代（IK 迭代内的增量刷新）。后代成员表**按骨缓存**（首次 O(骨数) 构建，之后每次 O(后代数)），成员按 `DeformOrder` 秩升序排列 —— `DeformOrder` 是「父边 ∪ 付与边」的拓扑序，子树在其中**不连续**，故只能缓存成员表、不能缓存区间 |
 | `SetPhysicsDrivenBones(bones)` / `ApplyPhysicsAppend()` / `HasPostPhysicsAppend` / `PhysicsAppendBoneCount` | 物理后付与 S3（见 [append-transform.md](animation/append-transform.md)） |
 | `Visible` | 表示枠求值结果（见 [visibility.md](animation/visibility.md)） |
 | `MorphRawWeights` / `MorphWeights` / `VertexMorphs` / `UvMorphs` / `BoneMorphs` / `MaterialMorphs` / `GroupMorphs` / `GroupOrder` | 表情（稀疏表，见 [lifecycle.md](animation/lifecycle.md)） |

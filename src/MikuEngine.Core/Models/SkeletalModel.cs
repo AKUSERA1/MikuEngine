@@ -223,8 +223,9 @@ public sealed class SkeletalModel
     public Quaternion[] IkLinkBaseRotations = Array.Empty<Quaternion>();
 
     /// <summary>
-    /// 每条链的使能位，索引与 <see cref="IkChains"/> 对齐。VMD 表示枠的 IK 开关写入此处；
-    /// 未声明的默认全开（表示枠是阶梯量，帧号早于首键时视为启用）。
+    /// 每条链的使能位，索引与 <see cref="IkChains"/> 对齐，由 IK 求解器读取。
+    /// 当前由转换期统一置 true（MmdAnimation 的 VMD 表示枠 IK 开关只解析保留在
+    /// IkStates，尚未接到这里——接线落点就是本数组）。
     /// </summary>
     public bool[] IkEnabled = Array.Empty<bool>();
 
@@ -236,8 +237,22 @@ public sealed class SkeletalModel
     private Quaternion[] _finalRotations = Array.Empty<Quaternion>();
     private Vector3[] _finalTranslations = Array.Empty<Vector3>();
 
-    /// <summary><see cref="UpdateWorldMatricesSubtree"/> 的子树标记，复用避免每帧分配。</summary>
-    private bool[] _subtreeMask = Array.Empty<bool>();
+    // ── 子树增量刷新缓存（IK 用）────────────────────────────────────────
+    //
+    // UpdateWorldMatricesSubtree 的朴素实现是「清一个 BoneCount 大小的标记数组 + 两趟全骨扫」，
+    // 而 IK 求解器每 link 每迭代都调它（实测 241.6 次/帧）⇒ 单帧 526,110 次 DeformOrder 访问，
+    // 其中真正需要重算的骨只有 616 个。这里改为按根骨缓存「后代成员表」：
+    // 每个根骨只构建一次，之后刷新成本 = O(后代数)。
+    //
+    // 为什么只能缓存成员列表、不能缓存区间：DeformOrder 是「父边 ∪ 付与边」的依赖拓扑序，
+    // 子树在其中【不连续】。成员按 deform 秩重排后，「父先于子」与「付与源先于付与目标」
+    // 两个不变量与原实现完全一致，故重算结果逐位相同。
+    private int[][]? _descendants;
+    private int[][]? _childrenByParent;
+    private int[]? _deformRank;
+    private int[]? _dfsSeen;
+    private Comparison<int>? _rankCmp;
+    private int _dfsStamp;
 
     // ── 物理后付与（PostPhysicsAppend）─────────────────────────────
     //
@@ -265,7 +280,7 @@ public sealed class SkeletalModel
     public Matrix4x4[] InverseBind = Array.Empty<Matrix4x4>();
     public Matrix4x4[] WorldMatrices = Array.Empty<Matrix4x4>();
 
-    /// <summary>SkinMatrices[i] = WorldMatrices[i] * InverseBind[i]（行主序，可直接喂 GLSL mat4）。</summary>
+    /// <summary>SkinMatrices[i] = InverseBind[i] * WorldMatrices[i]（行主序，可直接喂 GLSL mat4）。</summary>
     public Matrix4x4[] SkinMatrices = Array.Empty<Matrix4x4>();
 
     // ── 包围盒（绑定姿势，模型空间） ─────────────────────────────────────
@@ -407,29 +422,17 @@ public sealed class SkeletalModel
     /// "只推进链内"语义 —— 这里取"子树"作为<b>超集</b>：链骨与末端之间可能夹着非链骨，
     /// 只刷链骨会让中间骨的陈旧世界矩阵污染链骨自身的 world，而重算超集的值与之完全一致）。
     ///
-    /// 遍历仍走 <see cref="DeformOrder"/>，因此"父先于子"与"付与源先于付与目标"两个不变量不受影响。
+    /// 成员表按 <see cref="DeformOrder"/> 的秩升序排列后顺序遍历，故"父先于子"与
+    /// "付与源先于付与目标"两个不变量不受影响；重算集合 = 父边后代集（与朴素实现同集）。
     /// </summary>
     public void UpdateWorldMatricesSubtree(int rootBone)
     {
         if ((uint)rootBone >= (uint)BoneCount) return;
         EnsureScratch();
 
-        // 标记子树：DeformOrder 保证父先于子，一趟即可传播。
-        System.Array.Clear(_subtreeMask, 0, BoneCount);
-        _subtreeMask[rootBone] = true;
-        for (int k = 0; k < DeformOrder.Length; k++)
-        {
-            int i = DeformOrder[k];
-            if (_subtreeMask[i]) continue;
-            int p = ParentIndices[i];
-            if (p >= 0 && _subtreeMask[p]) _subtreeMask[i] = true;
-        }
-
-        for (int k = 0; k < DeformOrder.Length; k++)
-        {
-            int i = DeformOrder[k];
-            if (_subtreeMask[i]) RecomputeBone(i);
-        }
+        int[] members = DescendantsOf(rootBone);
+        for (int k = 0; k < members.Length; k++)
+            RecomputeBone(members[k]);
     }
 
     /// <summary>
@@ -550,6 +553,56 @@ public sealed class SkeletalModel
             RecomputeBone(order[k]);
     }
 
+    /// <summary>
+    /// 根骨 → 其「全部后代 + 自身」的骨骼索引表，已按 <see cref="DeformOrder"/> 的秩升序排列。
+    ///
+    /// 首次访问某根骨时构建（DFS 收成员后按秩排序），此后直接命中缓存；每帧路径零分配。
+    /// 前提：骨数 / 父索引在装载后不再变化（<see cref="EnsureScratch"/> 会在骨数变化时整体失效）。
+    /// </summary>
+    private int[] DescendantsOf(int root)
+    {
+        if (_descendants![root] is { } cached) return cached;
+
+        if (_childrenByParent is null)
+        {
+            _childrenByParent = new int[BoneCount][];
+            _deformRank = new int[BoneCount];
+            var counts = new int[BoneCount];
+            for (int i = 0; i < BoneCount; i++)
+            {
+                int p = ParentIndices[i];
+                if (p >= 0 && p < BoneCount) counts[p]++;
+            }
+            for (int i = 0; i < BoneCount; i++) _childrenByParent[i] = new int[counts[i]];
+            var fill = new int[BoneCount];
+            for (int i = 0; i < BoneCount; i++)
+            {
+                int p = ParentIndices[i];
+                if (p >= 0 && p < BoneCount) _childrenByParent[p][fill[p]++] = i;
+            }
+            for (int k = 0; k < DeformOrder.Length; k++) _deformRank[DeformOrder[k]] = k;
+            _dfsSeen = new int[BoneCount];
+        }
+
+        var members = new List<int>();
+        _dfsStamp++;
+        var stack = new Stack<int>();
+        stack.Push(root);
+        while (stack.Count > 0)
+        {
+            int u = stack.Pop();
+            if (_dfsSeen![u] == _dfsStamp) continue;
+            _dfsSeen[u] = _dfsStamp;
+            members.Add(u);
+            int[] children = _childrenByParent[u];
+            for (int i = 0; i < children.Length; i++) stack.Push(children[i]);
+        }
+        _rankCmp ??= (a, b) => _deformRank![a].CompareTo(_deformRank![b]);
+        members.Sort(_rankCmp);
+
+        return _descendants[root] = members.ToArray();
+    }
+
     private void EnsureScratch()
     {
         if (_finalRotations.Length != BoneCount)
@@ -557,8 +610,16 @@ public sealed class SkeletalModel
             _finalRotations = new Quaternion[BoneCount];
             _finalTranslations = new Vector3[BoneCount];
         }
-        if (_subtreeMask.Length != BoneCount)
-            _subtreeMask = new bool[BoneCount];
+        if (_descendants is null || _descendants.Length != BoneCount)
+        {
+            // 骨数变化（实例被复用于另一模型）⇒ 拓扑缓存整体失效。
+            _descendants = new int[BoneCount][];
+            _childrenByParent = null;
+            _deformRank = null;
+            _dfsSeen = null;
+            _rankCmp = null;
+            _dfsStamp = 0;
+        }
     }
 
     /// <summary>

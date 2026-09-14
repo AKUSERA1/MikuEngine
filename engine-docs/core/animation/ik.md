@@ -46,6 +46,9 @@ public static void Solve(SkeletalModel model, List<IkChainSolveResult>? results 
   `Solve → UpdateWorldMatrices`）。
 - 内部先跑一次全量 `UpdateWorldMatrices` 拿到 FK 世界矩阵并导出链骨基旋转；
   迭代中只在链骨子树上增量重算（`UpdateWorldMatricesSubtree`）；结束后由调用方再跑一次全量更新。
+  该增量刷新每次是 **O(后代数)**（后代成员表按骨缓存，见 [pmx-parser.md](../pmx-parser.md)）。
+  早期实现每调用一次都要「清 O(骨数) 标记数组 + 两趟全扫求值序」，而本模型的 IK 每帧要调 241.6 次
+  ⇒ 单帧 52.6 万次求值序访问、真正重算的骨只有 616 个，是当时的头号 CPU 热点。
 - 每次求解先整体复位 `IkRotations`（PmxEditor `InitializeAngle()`），无跨帧状态 ——
   "连续播放到帧 N ≡ 直接 seek 到帧 N"。
 - `results` 传 `null`（渲染路径）只求解不记录；诊断路径传入可拿到每条链的结果。

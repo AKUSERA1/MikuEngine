@@ -443,12 +443,32 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         {
             _physics = value;
             if (value != null)
-                _model.SetPhysicsDrivenBones(value.GetPhysicsDrivenBones());
+            {
+                List<int> driven = value.GetPhysicsDrivenBones();
+                _model.SetPhysicsDrivenBones(driven);
+                // 缓存「世界矩阵会被物理覆写的骨」列表（去重）：每帧蒙皮只重算这一子集。
+                // 判据与内核 ApplyDynamicsToBones 的写入过滤逐字相同
+                // （Type == Dynamic && BoneIndex 合法），故是完备上界。
+                _physicsDrivenBones = DedupeAscending(driven);
+            }
             else
+            {
                 _model.SetPhysicsDrivenBones(Array.Empty<int>());
+                _physicsDrivenBones = Array.Empty<int>();
+            }
         }
     }
     private MMDPhysics? _physics;
+    private int[] _physicsDrivenBones = Array.Empty<int>();
+
+    private static int[] DedupeAscending(List<int> bones)
+    {
+        if (bones.Count == 0) return Array.Empty<int>();
+        var set = new SortedSet<int>(bones);
+        var result = new int[set.Count];
+        set.CopyTo(result);
+        return result;
+    }
 
     /// <summary>
     /// 物理后付与开关（场景配置）。ON = MMD 等价：付与链在物理步后重算、消费模拟。
@@ -483,14 +503,60 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     /// </summary>
     public double PhysicsFrame { get; set; }
 
-    private float[]? _physBoneWorld;
-    private float[]? _physBoneInvBind;
+    private float[] _physBoneWorld = Array.Empty<float>();
+    private float[] _physBoneInvBind = Array.Empty<float>();
     private double _physPrevFrame;
     private bool _physHasPrev;
 
     /// <summary>
+    /// <see cref="Matrix4x4"/> 的内存布局是否等于「M11,M12,M13,M14,M21,…,M44」逐 float 顺序排列。
+    ///
+    /// <see cref="MMDPhysics.CopyMatricesToColumnMajor"/> 的字段写入序恰好就是这个顺序
+    /// （行主序存 Tᵀ 的线性序列 == 列主序存 T 的线性序列，见该函数注释），
+    /// 所以这两处「转序」本质是一次 64 B 块拷贝，逐字段标量写纯属浪费：
+    /// 实测往返 8.55 → 1.67 µs/帧。`System.Numerics` 未显式声明 StructLayout，
+    /// 故启动自检一次；不满足则退回标量实现（语义完全一致）。
+    /// </summary>
+    private static readonly bool Matrix4x4IsPacked = SelfCheckMatrixLayout();
+
+    private static bool SelfCheckMatrixLayout()
+    {
+        if (Marshal.SizeOf<Matrix4x4>() != 16 * sizeof(float)) return false;
+        var probe = new Matrix4x4(
+            1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f,
+            9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f);
+        ReadOnlySpan<float> fields =
+            MemoryMarshal.Cast<Matrix4x4, float>(MemoryMarshal.CreateReadOnlySpan(ref probe, 1));
+        for (int i = 0; i < 16; i++)
+            if (fields[i] != i + 1) return false;
+        return true;
+    }
+
+    /// <summary>行主序 <see cref="Matrix4x4"/>[] → 物理内核的列主序 float 缓冲（纯块拷贝）。</summary>
+    private static void MatricesToColumnMajor(Matrix4x4[] source, float[] destination)
+    {
+        if (Matrix4x4IsPacked)
+        {
+            MemoryMarshal.Cast<Matrix4x4, float>(source.AsSpan()).CopyTo(destination.AsSpan());
+            return;
+        }
+        MMDPhysics.CopyMatricesToColumnMajor(source, destination);
+    }
+
+    /// <summary>物理内核的列主序 float 缓冲 → 行主序 <see cref="Matrix4x4"/>[]（纯块拷贝）。</summary>
+    private static void ColumnMajorToMatrices(float[] source, Matrix4x4[] destination)
+    {
+        if (Matrix4x4IsPacked)
+        {
+            MemoryMarshal.Cast<float, Matrix4x4>(source.AsSpan()).CopyTo(destination.AsSpan());
+            return;
+        }
+        MMDPhysics.CopyColumnMajorToMatrices(source, destination);
+    }
+
+    /// <summary>
     /// 一渲染帧的物理段：骨骼世界矩阵转列主序 → 内核 <see cref="MMDPhysics.Update"/>
-    /// → 写回行主序 WorldMatrices → 重算蒙皮矩阵。
+    /// → 写回行主序 WorldMatrices → 重算被覆写骨的蒙皮矩阵。
     /// 逆绑定矩阵是常量，列主序副本只转一次。
     /// </summary>
     private void RunPhysics()
@@ -499,27 +565,48 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         var m = _model;
         int n = m.BoneCount;
 
-        if (_physBoneWorld == null || _physBoneWorld.Length != n * 16)
+        if (_physBoneWorld.Length != n * 16)
         {
             _physBoneWorld = new float[n * 16];
             _physBoneInvBind = new float[n * 16];
-            MMDPhysics.CopyMatricesToColumnMajor(m.InverseBind, _physBoneInvBind);
+            MatricesToColumnMajor(m.InverseBind, _physBoneInvBind);
         }
 
-        MMDPhysics.CopyMatricesToColumnMajor(m.WorldMatrices, _physBoneWorld);
         double frame = PhysicsFrame;
-        phys.Update(PhysicsEnabled, _physBoneWorld, _physBoneInvBind, frame, _physHasPrev ? _physPrevFrame : frame);
+        double prevFrame = _physHasPrev ? _physPrevFrame : frame;
+
+        if (!PhysicsEnabled)
+        {
+            // 关闭态：内核在 !enabled 时既不模拟也不写回（MMDPhysics.Update 首行早退），
+            // 所以「转出去再转回来」是恒等操作 —— 原来白跑两趟 11,616 float（≈8.5 µs/帧）。
+            // 仍调用一次 Update 以推进内核的 _wasEnabled / tick 基准，保证 OFF→ON 首帧
+            // 走 Reset + snap（否则重新开启会带着过期状态模拟）。
+            phys.Update(false, _physBoneWorld, _physBoneInvBind, frame, prevFrame);
+            _physHasPrev = true;
+            _physPrevFrame = frame;
+            return;
+        }
+
+        MatricesToColumnMajor(m.WorldMatrices, _physBoneWorld);
+        phys.Update(true, _physBoneWorld, _physBoneInvBind, frame, prevFrame);
         _physHasPrev = true;
         _physPrevFrame = frame;
 
-        // 物理写回只涉及带刚体的骨骼，但全量转回 + 全量蒙皮重算是 O(骨数) 的 4x4 乘，
-        // 远低于一次 IK 求解，不值得做稀疏差分。
-        MMDPhysics.CopyColumnMajorToMatrices(_physBoneWorld, m.WorldMatrices);
-        // 物理后付与：付与链消费模拟结果。无拓扑时 O(1) 早退；受影响子集的
-        // SkinMatrices 由 RecomputeBone 内部重算，下面的全量循环覆盖物理写回的骨。
+        ColumnMajorToMatrices(_physBoneWorld, m.WorldMatrices);
+        // 物理后付与：付与链消费模拟结果。无拓扑时 O(1) 早退；付与受影响子集的
+        // SkinMatrices 由 RecomputeBone 末尾一并重算。
         if (PostPhysicsAppendEnabled) m.ApplyPhysicsAppend();
-        for (int i = 0; i < n; i++)
+
+        // 物理写回只改「刚体绑定骨」的世界矩阵（内核 ApplyDynamicsToBones 的过滤判据
+        // 与 GetPhysicsDrivenBones 相同；AlignPinnedBodiesToBones 只改 body 状态），
+        // 且驱动骨已被 SetPhysicsDrivenBones 排除在付与重算集合之外
+        // ⇒ 驱动骨 ∪ 付与子集 即全部脏骨，无需全量 726 骨重算。
+        int[] driven = _physicsDrivenBones;
+        for (int k = 0; k < driven.Length; k++)
+        {
+            int i = driven[k];
             m.SkinMatrices[i] = m.InverseBind[i] * m.WorldMatrices[i];
+        }
     }
 
     /// <summary>
