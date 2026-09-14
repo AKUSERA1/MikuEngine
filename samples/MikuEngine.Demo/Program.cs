@@ -28,7 +28,7 @@ using MikuEngine.Engine;
 //   G    ：地面碰撞开关（Stage 1 S2；模型空间 y=0 内置地面，默认开）
 //   H    ：物理后付与开关（Stage 1 S3；付与链消费模拟结果，OFF 回物理前姿态，A/B 对照）
 //   IJKL/UO：模型面板 移動（Y/X/Z 世界轴，Shift 微调）| Alt+同键：面板 回転（YXZ 序 ±15°）
-//   ./,  ：モデル操作 拡大率（渲染层根矩阵，与物理解耦；Shift+, 只缩 Y 压纸片）| R：重置
+//   ./,  ：モデル操作 拡大率（渲染层根矩阵，与物理解耦；Shift+同键只改 Z 压纸片）| R：重置
 //
 // --smoke     ：无人值守自检。隐藏窗口跑 40 帧 → 强制开影模式 1 → 打印中间 RT 统计 → 退出。
 //               （跳过动画加载：自阴影/轮廓线这类多 pass 功能的"静默失效"没法靠肉眼看画面定位，
@@ -345,7 +345,7 @@ window.Load += () =>
                 //   移動：I/K=Y∓  J/L=X∓  U/O=Z∓（步长 0.5；Shift=±0.1 微调）
                 //   回転：Alt+I/K=X（俯仰）∓  Alt+J/L=Y（偏航）∓  Alt+U/O=Z（滚转）∓，±15°，
                 //         MMD YXZ 欧拉序，状态为绝对弧度（每帧由 ApplyModelTransform 重建，天然幂等）
-                //   拡大率： ./,=全体 ×1.1 / ÷1.1；Shift+,=只缩 Y 轴（压成纸片）
+                //   拡大率： .=全体放大 / ,=全体缩小（×1.1）；Shift+同键 = 只改 Z 轴（压纸片）
                 bool shift = (mods & Silk.NET.GLFW.KeyModifiers.Shift) != 0;
                 bool alt = (mods & Silk.NET.GLFW.KeyModifiers.Alt) != 0;
                 float moveStep = shift ? 0.1f : 0.5f;
@@ -373,12 +373,17 @@ window.Load += () =>
                     case Keys.O when alt: m2.ModelRotationAngles.Z += rotStep; handled = true; break;
 
                     // ── 拡大率（与物理解耦，只进渲染层根矩阵）──
-                    case Keys.Period:          // .  = 放大全体
-                        target.ModelScale *= scaleFactor; handled = true; break;
-                    case Keys.Comma:           // ,  = 缩小全体
-                        target.ModelScale /= scaleFactor; handled = true; break;
-                    case Keys.Y when shift:    // Shift+Y = 只缩 Y 轴（压纸片测试）
-                        target.ModelScale = target.ModelScale with { Y = MathF.Max(target.ModelScale.Y / scaleFactor, 0.01f) };
+                    // Shift 修饰 = 只改 Z 轴（压纸片测试）；GLFW 的 Keys 是物理键位，
+                    // Shift+, 依旧上报 Keys.Comma + Shift 修饰位，不会落到别的键上。
+                    case Keys.Period:
+                        target.ModelScale = shift
+                            ? target.ModelScale with { Z = MathF.Min(target.ModelScale.Z * scaleFactor, 100f) }   // Shift+. = 只拉伸 Z
+                            : target.ModelScale * scaleFactor;                                                    // .      = 放大全体
+                        handled = true; break;
+                    case Keys.Comma:
+                        target.ModelScale = shift
+                            ? target.ModelScale with { Z = MathF.Max(target.ModelScale.Z / scaleFactor, 0.01f) }  // Shift+, = 只压扁 Z
+                            : target.ModelScale / scaleFactor;                                                    // ,      = 缩小全体
                         handled = true; break;
                 }
 
@@ -399,7 +404,7 @@ window.Load += () =>
     Console.WriteLine("[Demo] 模型变换（MMD モデル操作，全ての親 为基准，操作中心留在原地）:");
     Console.WriteLine("[Demo]   移動: I/K=Y∓ | J/L=X∓ | U/O=Z∓（0.5/步，Shift=0.1 微调）");
     Console.WriteLine("[Demo]   回転: Alt+I/K=X | Alt+J/L=Y | Alt+U/O=Z（∓15°/步，YXZ 序）");
-    Console.WriteLine("[Demo]   拡大率: .=放大 | ,=缩小（×1.1，Shift+,=只缩Y压纸片；与物理解耦）");
+    Console.WriteLine("[Demo]   拡大率: .=放大 | ,=缩小（×1.1；Shift+同键=只改Z轴压纸片；与物理解耦）");
     Console.WriteLine("[Demo]   R=重置全部模型变换");
 
     if (smoke)
