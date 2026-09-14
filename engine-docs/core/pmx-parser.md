@@ -104,15 +104,39 @@ offset  size  format            说明
 48       4    ubvec4 ubyte      aWeights（UNSIGNED_BYTE ×4，硬件归一化 ÷255）
 ```
 
-**为什么骨骼索引用 UNSIGNED_SHORT**：测试模型有 1099 骨，UNSIGNED_BYTE（最大 255）装不下。
+**为什么骨骼索引用 UNSIGNED_SHORT**：绑定骨骼数远超 UNSIGNED_BYTE 能表达的 255
+（历史测试模型 1099 骨，当前 Demo 模型 `Model/1/1.pmx` 726 骨），UNSIGNED_BYTE 装不下。
 
 ### 骨骼状态
 
 ```csharp
 model.LocalRotations[i] = newRotation;   // 设置局部旋转（四元数）
 model.UpdateWorldMatrices();              // 按 DeformOrder（拓扑序）重算
-// 之后 model.SkinMatrices[i] = WorldMatrices[i] * InverseBind[i] 已准备好上传 GPU
+// 之后 model.SkinMatrices[i] = InverseBind[i] * WorldMatrices[i] 已准备好上传 GPU
 ```
+
+乘序（行向量 `v · M`）：`local * parentWorld`、`InverseBind * WorldMatrices`。
+绑定姿势下 `Skin ≡ I`，写成另一种顺序数值相同，静态预览看不出差别；
+一旦有旋转，`parentWorld * local` 会把父骨原点拿子骨旋转去转，误差随「骨到原点的距离」放大
+（上半身 / 手臂 / 手指链条会撕裂成放射状薄片）。
+
+### 姿势求值相关成员
+
+围绕 `UpdateWorldMatrices` 的求值链（軸制限 → 付与 → IK）在 Core 层暴露以下成员，
+详细语义见动画子系统文档：
+
+| 成员 | 说明 |
+|---|---|
+| `DeformOrder` | 「父先于子」且「付与源先于付与目标」的求值序（转换期 `BuildEvaluationOrder` 算好） |
+| `AppendSources` / `AppendRatios` / `AppendRotate` / `AppendMove` / `AppendIsLocal` | 付与（见 [append-transform.md](animation/append-transform.md)） |
+| `AxisLimits` | 軸制限轴（已归一化，`Zero` = 无限制） |
+| `IkChains` / `IsIkLink` / `IkRotations` / `IkLinkBaseRotations` / `IkEnabled` / `IkSolverEnabled` | IK（见 [ik.md](animation/ik.md)） |
+| `FinalRotations` / `FinalTranslations` | 最近一次求值的「付与 + IK 之后」有效局部变换（只读快照，不回写 `Local*`） |
+| `UpdateWorldMatricesSubtree(bone)` | 只重算某骨及其全部后代（IK 迭代内的增量刷新） |
+| `SetPhysicsDrivenBones(bones)` / `ApplyPhysicsAppend()` / `HasPostPhysicsAppend` / `PhysicsAppendBoneCount` | 物理后付与 S3（见 [append-transform.md](animation/append-transform.md)） |
+| `Visible` | 表示枠求值结果（见 [visibility.md](animation/visibility.md)） |
+| `MorphRawWeights` / `MorphWeights` / `VertexMorphs` / `UvMorphs` / `BoneMorphs` / `MaterialMorphs` / `GroupMorphs` / `GroupOrder` | 表情（稀疏表，见 [lifecycle.md](animation/lifecycle.md)） |
+| `ModelTranslationOffset` / `ModelRotationAngles` / `RootTransformBoneIndex` / `OperationCenterBoneIndex` / `ApplyModelTransform()` | 模型面板变换（见 [model-transform.md](model-transform.md)） |
 
 ### 包围盒
 
@@ -129,8 +153,9 @@ Vector3 size   = model.BoundsSize;     // 绑定姿势尺寸
 
 ```csharp
 SkeletalModel model = SkeletalModelConverter.Convert(pmx);
-// 内部：BuildBones → BuildVertices → BuildIndices → BuildSegments
-// 末尾自动 ResetPose() → 所有骨设为单位旋转
+// 内部：BuildBones → BuildVertices → BuildIndices → BuildSegments → BuildMorphs
+//       → ResolveModelTransformBones（按名定位 全ての親 / 操作中心）
+//       → ResetPose()（所有骨设为单位旋转，LocalTranslations = LocalPositions）
 ```
 
 ### 权重处理（ComputeWeightBytes）
@@ -140,7 +165,12 @@ SkeletalModel model = SkeletalModelConverter.Convert(pmx);
 1. SDEF → Bdef2 退化，QDEF → Bdef4 退化
 2. 第 4 槽用推导值 `1 - w0 - w1 - w2` 而非文件存的 Weight3
 3. 脏数据兜底：负权重清零 + 整体归一化
-4. 最后一槽塞入余数（255 - 前三槽和），保证四槽字节和恒为 255
+4. 逐槽四舍五入后，把和的**残差塞给最大槽**，保证四槽字节和恒为 255
+
+> 第 4 条的细节值得记一笔：曾把残差塞给「最后一个非零槽」。当小槽各自 +0.5 的舍入累积
+> 把前面槽的和顶过 255 时，`255 - acc` 为负被 Clamp 成 0，总和变成 256
+> （实测 `1.pmx` 顶点 54 = 176,78,2,0）。残差必须由**最大槽**吸收：
+> `max + delta ≤ 255` 数学上恒成立，因为 `delta = 255 − Σ ≤ 255 − max`。
 
 ### 材质段分类（ClassifyMaterial）
 

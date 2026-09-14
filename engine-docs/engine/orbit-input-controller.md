@@ -22,7 +22,7 @@ Engine 层是**唯一**应该调整灵敏度的地方。Core 层 OrbitCamera 的
 
 ## 源文件
 
-[OrbitInputController.cs](../../../src/MikuEngine.Engine/OrbitInputController.cs)
+[OrbitInputController.cs](../../src/MikuEngine.Engine/OrbitInputController.cs)
 
 ## 构造函数
 

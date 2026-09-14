@@ -4,7 +4,7 @@ GL 上下文包装 + Shader 编译 + VBO/UBO/SSBO 辅助方法。
 
 ## 源文件
 
-[GlesDevice.cs](../../../src/MikuEngine.Render.GLES/GlesDevice.cs)
+[GlesDevice.cs](../../src/MikuEngine.Render.GLES/GlesDevice.cs)
 
 ## 构造函数
 

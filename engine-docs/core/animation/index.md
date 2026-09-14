@@ -30,6 +30,9 @@ MmdAnimation.Bind(model)       ← 绑定到具体模型（数值数组与源轨
                  MmdMorphEvaluator.Evaluate(model)   ← Group 传播 + 骨 morph 折入局部 T/R
                      │
                      ▼
+                 model.ApplyModelTransform()         ← 面板 移動/回転（全ての親 后乘因子）
+                     │
+                     ▼
                  MmdIkSolver.Solve(model)            ← CCD IK（迭代中含增量世界矩阵重算）
                      │
                      ▼
@@ -44,6 +47,8 @@ MmdAnimation.Bind(model)       ← 绑定到具体模型（数值数组与源轨
 
 以上 IK → 物理段在渲染路径中由 `GlesModelRenderer.PrepareFrame` 统一驱动（详见
 [ik.md](ik.md)、[append-transform.md](append-transform.md) 与 [物理模块](../../physics/index.md)）。
+模型面板 拡大率 则**不在这条链上**——它只进渲染层根矩阵，见
+[model-transform.md](../model-transform.md)。
 
 ## 设计原则
 
@@ -68,6 +73,7 @@ MmdAnimation.Bind(model)       ← 绑定到具体模型（数值数组与源轨
 | [ik.md](ik.md) | MmdIkSolver（CCD）· MmdIkChain / MmdIkChainBuilder · 角度限制 / ReverseClamp |
 | [append-transform.md](append-transform.md) | 付与变换（含局部付与 / 自付与 / 物理后付与 S3） |
 | [lifecycle.md](lifecycle.md) | 绑定 / 层增删 / 清除 / GC 保证 · MmdMorphEvaluator 调用顺序 |
+| [../model-transform.md](../model-transform.md) | 模型面板 移動/回転/拡大率（全ての親 注入 · 渲染层缩放解耦） |
 
 ## 源文件
 

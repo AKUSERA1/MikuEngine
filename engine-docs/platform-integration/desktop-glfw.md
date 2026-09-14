@@ -1,7 +1,7 @@
 # 桌面 GLFW 集成
 
 本页讲解 Silk.NET.Windowing.Glfw 2.23 + Silk.NET.GLFW 的输入绑定方式。  
-完整代码见 [Program.cs](../../../samples/MikuEngine.Demo/Program.cs)。
+完整代码见 [Program.cs](../../samples/MikuEngine.Demo/Program.cs)。
 
 ## 窗口创建
 

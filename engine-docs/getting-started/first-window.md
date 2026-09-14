@@ -1,7 +1,7 @@
 # 跑通第一个 Demo
 
 本页是 `samples/MikuEngine.Demo/Program.cs` 的逐段讲解。  
-完整代码见 [Program.cs](../../../samples/MikuEngine.Demo/Program.cs)。
+完整代码见 [Program.cs](../../samples/MikuEngine.Demo/Program.cs)。
 
 ## 完整清单
 

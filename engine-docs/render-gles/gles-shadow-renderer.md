@@ -4,12 +4,12 @@
 
 ## 源文件
 
-[GlesShadowRenderer.cs](../../../src/MikuEngine.Render.GLES/GlesShadowRenderer.cs)  
-[shadow.vert.glsl](../../../src/MikuEngine.Render.GLES/Shaders/shadow.vert.glsl)  
-[shadow_z.frag.glsl](../../../src/MikuEngine.Render.GLES/Shaders/shadow_z.frag.glsl)  
-[shadow_mask.frag.glsl](../../../src/MikuEngine.Render.GLES/Shaders/shadow_mask.frag.glsl)（mask 已删除，保留作为参考）  
-[floor_shadow.vert.glsl](../../../src/MikuEngine.Render.GLES/Shaders/floor_shadow.vert.glsl)  
-[floor_shadow.frag.glsl](../../../src/MikuEngine.Render.GLES/Shaders/floor_shadow.frag.glsl)
+[GlesShadowRenderer.cs](../../src/MikuEngine.Render.GLES/GlesShadowRenderer.cs)  
+[shadow.vert.glsl](../../src/MikuEngine.Render.GLES/Shaders/shadow.vert.glsl)  
+[shadow_z.frag.glsl](../../src/MikuEngine.Render.GLES/Shaders/shadow_z.frag.glsl)  
+[shadow_mask.frag.glsl](../../src/MikuEngine.Render.GLES/Shaders/shadow_mask.frag.glsl)（mask 已删除，保留作为参考）  
+[floor_shadow.vert.glsl](../../src/MikuEngine.Render.GLES/Shaders/floor_shadow.vert.glsl)  
+[floor_shadow.frag.glsl](../../src/MikuEngine.Render.GLES/Shaders/floor_shadow.frag.glsl)
 
 ## 三 pass 流程
 
@@ -19,7 +19,7 @@
 │  FBO: depth-only (DEPTH_COMPONENT24 直挂 depth attachment) │
 │  着色器: shadow.vert + shadow_z.frag（输出颜色恒定，只有深度有值）│
 │  光栅化: PolygonOffset(factor=1.5, units=2) 消 acne        │
-│  绑定: 模型的 VAO / FrameUbo / SkinSsbo                    │
+│  绑定: 模型的 VAO / FrameUbo / SkinSsbo + uModelRoot                    │
 └───────────────────────────────────────────────────────────┘
             │
             ▼
@@ -63,6 +63,20 @@ if (shadow.Mode == ShadowMode.SelfShadowAndFloor)
 
 ## 光照深度图
 
+### 公开属性
+
+| 成员 | 说明 |
+|---|---|
+| `Mode` | 影模式（`Off` / `SelfShadow` / `SelfShadowAndFloor`），默认 `Off` |
+| `Enabled` | `Mode != Off` |
+| `LightViewProj` | 本帧光照 ViewProj，宿主填进 `FrameUniforms.LightViewProj` |
+| `ZTexture` | 光照深度图（`DEPTH_COMPONENT24`，比较采样器） |
+| `Texel` | `1 / 影图边长`，主渲染与床影 PCF 核缩放（单一来源，不再硬编码 1/1024） |
+| `TexelWorld` | 一个 texel 覆盖的世界尺寸（`2·_e / 分辨率`）；法线偏移按世界 texel 接线 |
+| `Resolution` | 影图边长（正方形 `int`，默认 2048，内部 clamp 到 `[512, 4096]`）。赋值即重建影图目标（`R512…R4096` 是枚举档位，属性收 int） |
+| `AttachModelBuffers(frameUbo, skinSsbo)` | 由 model renderer 注入，影 pass 复用同一份 UBO/SSBO |
+| `DumpMapStats()` | 诊断：读回深度图统计覆盖比例与 z 范围（`--smoke` 用） |
+
 ### 为什么是 DEPTH_COMPONENT24（方案 B）
 
 旧版用 RGBA32F 颜色图 + 独立 renderbuffer 深度（双份），显存 28 B/px。新方案只用 `DEPTH_COMPONENT24` 直挂 depth attachment，显存 4 B/px。精度从 32f 变 24 bit 定点——对 0.003 偏置仍绰绰有余。
@@ -79,6 +93,19 @@ if (shadow.Mode == ShadowMode.SelfShadowAndFloor)
 ---
 
 ## UpdateLight：紧视锥 + texel snapping
+
+### 模型变换的影响（先读这条）
+
+`UpdateLight` 用 `model.BoundsCenter` / `BoundsSize`（**绑定姿势** AABB）算视锥与 `_e`，
+Z pass 的 caster 位置却过渲染层根矩阵（`uModelRoot`，即含 移動/回転/拡大率）。
+因此：
+
+- **移動/回転（小幅度）**没问题——半宽有 `+1` 单位余量、深度范围按 AABB 沿光方向投影再 ±4 单位。
+- **拡大率 > 1 到超出视锥**时 caster 会被裁掉 ⇒ 影子缺失/变淡；
+  `移動` 幅度大时同理。放大模型后需要自行重算视锥（当前 API 未提供缩放补偿）。
+- 床影 overlay 是固定 ±300 的模型空间四边形，**不乘根矩阵**，不随缩放变化。
+
+详见 [model-transform.md §5](../core/model-transform.md)。
 
 ### 紧视锥（密度目标 ≈ reze 近级联 64 texels/unit）
 

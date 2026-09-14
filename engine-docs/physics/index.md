@@ -73,15 +73,21 @@ modelRenderer.PhysicsFrame = timeline.CurrentFrame; // tick 时钟由动画帧�
 ## 与动画管线的帧序
 
 ```
-VMD 采样 → MorphEvaluator → MmdIkSolver.Solve
+VMD 采样 → MorphEvaluator → SkeletalModel.ApplyModelTransform（面板 移動/回転）
+    → MmdIkSolver.Solve
     → UpdateWorldMatrices（軸制限 → 付与 → IK）
     → MMDPhysics.Update（SetKinematicTargets → Step → WriteBack）
     → SkeletalModel.ApplyPhysicsAppend（物理后付与）
-    → 重算蒙皮矩阵 → 渲染
+    → 重算蒙皮矩阵 → 渲染（蒙皮后再施加渲染层根矩阵，即 拡大率）
 ```
 
 物理 tick 时钟由**动画帧号**驱动（`tickTarget = floor(帧号 × 2)`，每 tick 1/60 动画秒）：
 动画暂停 / 未加载时帧号不推进 ⇒ `advance = 0` ⇒ 物理冻结（MMD 行为：物理随动画走）。
+
+**面板 移動/回転 在物理之上游，拡大率 在物理之外**：前者注入 全ての親 世界矩阵
+⇒ kinematic 目标与 IK 自动跟随；后者只进渲染层根矩阵，物理世界完全看不见它
+（刚体、关节、teleport 阈值、付与全跑在 bind 尺度）。见
+[模型变换](../core/model-transform.md)。
 
 ## 确定性契约（DET）
 

@@ -60,7 +60,7 @@ model.Visible = (activeCount > 0) ? visible : true
 动效求值写回 `Visible`，但「关闭动画驱动」时应显式复位，否则会停在隐藏窗口一直看不见：
 
 ```csharp
-// Demo 的 V 键：关掉动画驱动时
+// 宿主关掉动画驱动时（Demo 的 --smoke 路径即跳过 VMD 加载）
 model.ResetPose();            // 局部 T/R 回绑定
 model.ResetMorphWeights();    // 表情权重回 0
 model.Visible = true;         // 表示枠也复位

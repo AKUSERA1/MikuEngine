@@ -22,7 +22,7 @@
 
 ## 源文件
 
-[OrbitCamera.cs](../../../src/MikuEngine.Core/Camera/OrbitCamera.cs)
+[OrbitCamera.cs](../../src/MikuEngine.Core/Camera/OrbitCamera.cs)
 
 ## 构造函数
 

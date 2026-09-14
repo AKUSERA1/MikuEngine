@@ -66,7 +66,10 @@ public readonly record struct VmdIkState(string BoneName, byte[] NameRaw, bool E
 - **`NameRaw`**：名字的原始字节，是解码器无关的权威标识。跨模型绑定时若解码名对不上，
   可用原始字节兜底（见下方 `MmdAnimation.Bind`）。
 - **`VmdPropertyKey.Visible`**：可见性极性为 `byte != 0 ⇒ 可见`（与 babylon-mmd 解析层一致，已用 test.vmd 实测）。
-- **`VmdIkState`**：property 键附带的 IK 开关。本引擎无 IK ⇒ **解析保留、不消费**，等 IK 立项后直接启用。
+- **`VmdIkState`**：property 键附带的 IK 开关。IK 求解器与服务端使能位
+  （`SkeletalModel.IkEnabled`，`MmdIkSolver.Solve` 会读）都已就位，但**本引擎尚未把
+  property 的 `IkStates` 接过去**——目前只在 `MmdAnimation.IkStates` 里解析保留，
+  `IkEnabled` 由转换期统一置 `true`。接线时的落点很明确：按帧取阶梯布尔写进逐链使能位。
 
 ### 编码约定（Shift-JIS 932）
 
@@ -121,7 +124,7 @@ MmdAnimation boundB  = expanded.Bind(modelB);
 
 - 表示枠是**离散状态**：键间保持、绝不插值；早于首键返回 `true`（未声明「非表示」的动效应照常渲染）。
 - 是**整模型**量，不参与「按模型绑定」的过滤，原样透传给绑定实例。
-- IK 开关随键保留（`IkStates`），本引擎不消费。
+- IK 开关随键保留（`IkStates`），但尚未接到 `SkeletalModel.IkEnabled`（见上）。
 
 ---
 

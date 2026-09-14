@@ -1,9 +1,9 @@
 # 渲染辅助组件
 
-四个支撑性组件，服务于 GlesModelRenderer 和 GlesShadowRenderer：
-- [GlesTextureLibrary](#glestexturelibrary--pmxtexturespath--pmxfileresolver)：纹理加载 / 缓存 / 白色兜底
-- [PmxTexturePath & PmxFileResolver](#glestexturelibrary--pmxtexturespath--pmxfileresolver)：路径归一化 / 磁盘查找
+五个支撑性组件，服务于 GlesModelRenderer 和 GlesShadowRenderer：
+- [GlesTextureLibrary + PmxTexturePath + PmxFileResolver](#glestexturelibrary--pmxtexturepath--pmxfileresolver)：纹理加载 / 缓存 / 白色兜底 → 路径归一化 / 磁盘查找
 - [GlesSkinMatricesBuffer](#glesskinmatricesbuffer)：蒙皮矩阵 SSBO，多模型共用缓冲
+- [GlesMorphBuffer](#glesmorphbuffer)：顶点 / UV 表情偏移 SSBO，稀疏脏区上传
 - [GlesDebugOverlay](#glesdebugoverlay)：Z 图屏幕预览
 
 ---
@@ -16,7 +16,7 @@ PMX 里的纹理路径是相对路径，常混用 `\` 与 `/`，部分文件带 
 
 ```
 PmxTexturePath.Normalize        // 路径清洗（Core 层，纯字符串）
-PmxFileResolver.Resolve         // Core 层路径 → 磁盘绝对路径（含大小写不敏感兜底）
+PmxFileResolver.Resolve         // 路径 → 磁盘绝对路径（含大小写不敏感兜底；Render.GLES 层）
 GlesTextureLibrary.Load         // 从磁盘文件 → GL 纹理（Render 层）
 ```
 
@@ -64,7 +64,7 @@ string? toonPath = PmxFileResolver.ResolveSharedToon("C:/model", sharedIndex: 0)
 
 ## GlesSkinMatricesBuffer
 
-整帧所有模型共用的蒙皮矩阵 SSBO。解决"单模型 1099 骨 = 70 KB 撑爆 UBO 最小 16 KB"的问题——SSBO 最小保证 128 MB。
+整帧所有模型共用的蒙皮矩阵 SSBO。解决"单模型骨数（536~1099 量级）= 数十 KB 撑爆 UBO 最小 16 KB"的问题——SSBO 最小保证 128 MB。
 
 ### Layout
 
@@ -101,6 +101,53 @@ modelB.SkinMatrixBaseOffset = baseB;
 | 单个模型 1099 骨 | 70 KB → **爆** | 70 KB → OK |
 | std430 vs std140 | 必须 std140 | 推荐 std430 |
 | 多模型共用 | 很难 | 天然支持（Append 累积） |
+
+---
+
+## GlesMorphBuffer
+
+顶点 / UV 表情偏移 SSBO 的通用实现，一个类实例对应一种元素尺寸：
+
+| 用途 | 绑定 | 元素 | 元素尺寸 |
+|---|---|---|---|
+| 顶点 morph | binding 2 | `vec4 uMorphOffsets[]`（用 xyz） | 16 B（std430 stride） |
+| UV morph | binding 3 | `vec2 uMorphUvs[]` | 8 B |
+
+```csharp
+var morph   = new GlesMorphBuffer(device, model.VertexCount, components: 4);   // 顶点
+var morphUv = new GlesMorphBuffer(device, model.VertexCount, components: 2);   // UV
+
+// 每帧（PrepareFrame 内）
+morph.Update(model, model.MorphWeights);      // 顶点：重算 + 上传脏区
+morphUv.UpdateUv(model, model.MorphWeights);  // UV
+morph.Bind(2);                                 // 顶点 = 2，UV = 3
+```
+
+### 内存模型（与 babylon-mmd 的分野）
+
+只有**一份** O(顶点数) 的缓冲，大小与 morph 数量**无关**；每条 morph 的偏移数据仍留在 Core 侧的稀疏表里。
+babylon-mmd 给每条 morph 复制一份与顶点数等长的稠密数组 ⇒ O(顶点数 × morph 数)。
+
+每帧开销同样是稀疏的：
+
+1. 只把「上一帧动过的顶点」清零（不整段 O(V) 清零）；
+2. 只遍历「权重非 0」的 morph 的受影响顶点累加；
+3. 只上传「上一帧 ∪ 本帧」脏区那一段（`BufferSubData` 带偏移）。
+
+索引一律用 `gl_VertexID`（`glDrawElements` 下它等于**顶点索引**，不是元素序号），
+因此不需要额外的索引缓冲。
+
+### 诊断
+
+| 成员 | 说明 |
+|---|---|
+| `BufferId` | GL 缓冲句柄 |
+| `VertexCapacity` | 容量（`max(模型顶点数, 1)`） |
+| `LastTouchedVertexCount` | 最近一次 Update 碰过的顶点数 |
+| `LastUploadVertexCount` | 最近一次实际上传的区间长度（0 = 本帧无需上传） |
+
+> 即便本帧没有活跃 morph，也必须把上一帧的脏区以「已清零」的版本传一遍，
+> 否则 GPU 上会残留上一层表情的偏移（`Update` 内部已处理）。
 
 ---
 

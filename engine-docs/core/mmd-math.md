@@ -1,12 +1,14 @@
-# 数学工具 — MmdMath / QuatMath / Mat4
+# 数学工具 — MmdMath / QuatMath / Mat4 / ModelRootTransform
 
-MMD 专用数学工具。注意：MMD 使用列主序矩阵，与 `System.Numerics.Matrix4x4` 约定一致。
+MMD 专用数学工具。MmdMath / QuatMath / ModelRootTransform 是纯数学、零 GL 依赖，可在单测里直接跑；
+Mat4 是 `float[]` 列主序工具（物理内核与骨骼同步层用）。
 
 ## 源文件
 
-[MmdMath.cs](../../../src/MikuEngine.Core/Math/MmdMath.cs) ·
-[QuatMath.cs](../../../src/MikuEngine.Core/Math/QuatMath.cs) ·
-[Mat4.cs](../../../src/MikuEngine.Core/Math/Mat4.cs)
+[MmdMath.cs](../../src/MikuEngine.Core/Math/MmdMath.cs) ·
+[QuatMath.cs](../../src/MikuEngine.Core/Math/QuatMath.cs) ·
+[Mat4.cs](../../src/MikuEngine.Core/Math/Mat4.cs) ·
+[ModelRootTransform.cs](../../src/MikuEngine.Core/Math/ModelRootTransform.cs)
 
 ## 公开常量
 
@@ -91,3 +93,16 @@ MMD 的 VMD 中，关节角度限制用的就是 YXZ 顺序：先绕 Y（yaw）�
 | `Mat4.FromQuatInto(...)` | 四元数 → 旋转矩阵 |
 | `Mat4.LocalTransformInto(...)` / `FromPositionRotationInto(...)` | 局部 T×R 变换构建（骨骼 / 刚体偏移矩阵） |
 | `Mat4.MultiplyArrays(...)` | 平铺数组乘法（物理热路径，零分配） |
+
+## ModelRootTransform（渲染层根矩阵）
+
+模型面板 拡大率 / 无载体 TR 的纯数学部分（`System.Numerics` 行主序 row-vector 约定）。
+完整语义见 [model-transform.md](model-transform.md)。
+
+| 成员 | 说明 |
+|---|---|
+| `MinScale = 0.01f` | 逐轴缩放下限（0 会让逆矩阵不存在） |
+| `ClampScale(Vector3)` | 逐轴钳制，防 0 / 负值（负值等价翻转） |
+| `ComputeRootMatrix(hasCarrier, move, rotYxz, scale)` | 有载体 → `S`；无载体 → `R · T(move) · S`（行向量，缩放最外层） |
+| `ComputeNormalMatrix(Matrix4x4 root)` | `Root` 线性部分的逆**转置**（非均匀缩放的法线方向修正） |
+| `ExtractLinear3x3(in Matrix4x4)` / `ToArray(in Matrix4x4)` | 按 GLSL 上传约定展平（行主序原样，transpose = false） |
