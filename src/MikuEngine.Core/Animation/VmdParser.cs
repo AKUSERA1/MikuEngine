@@ -22,6 +22,24 @@ public readonly record struct VmdBoneKey(
 public readonly record struct VmdMorphKey(string MorphName, byte[] NameRaw, uint Frame, float Weight);
 
 /// <summary>
+/// 一条相机关键帧（61B 原始数据）。
+///
+/// MMD 相机是「注视点」模型：看向 <see cref="Target"/>，沿自身 forward 后退 <see cref="Distance"/>
+/// （<b>distance 为负</b> = 相机在目标后方），朝向由 <see cref="RotationEuler"/>（弧度）决定。
+/// fov 原始为 u32 视角<b>度数</b>，解析时已转弧度存入 <see cref="FovDegrees"/> 命名保持原始语义。
+/// </summary>
+public readonly record struct VmdCameraKey(
+    uint Frame,
+    float Distance,
+    Vector3 Target,
+    Vector3 RotationEuler,
+    /// <summary>视角度数（VMD 原始 u32）。</summary>
+    float FovDegrees,
+    /// <summary>24B 插值参数原样保留：6 通道（posX/posY/posZ/rot/dist/fov）× 4B（x1,x2,y1,y2），
+    /// <b>按通道连续排布</b>——与骨骼 64B 的「每通道 4 份 16B 副本」布局不同（见 MmdCameraTrack）。</summary>
+    byte[] Interpolation);
+
+/// <summary>
 /// 一条 property（表示枠）关键帧：整模型显示 / 非表示 + 附带的 IK 开关列表。
 ///
 /// 可见性极性：<c>byte != 0 ⇒ 可见</c>。
@@ -36,7 +54,7 @@ public readonly record struct VmdPropertyKey(int Frame, bool Visible, VmdIkState
 /// </summary>
 public readonly record struct VmdIkState(string BoneName, byte[] NameRaw, bool Enabled);
 
-/// <summary>VMD 解析结果：骨骼 / 表情 / property（表示枠）关键帧原样数据 + 其余区段仅计数。</summary>
+/// <summary>VMD 解析结果：骨骼 / 表情 / property（表示枠）/ 相机关键帧原样数据 + 其余区段仅计数。</summary>
 public sealed class VmdMotion
 {
     public string ModelName = "";
@@ -52,8 +70,10 @@ public sealed class VmdMotion
     /// <summary>表示枠（显示 / 非表示）关键帧，文件顺序。IK 开关随键保留但本引擎不消费。</summary>
     public List<VmdPropertyKey> PropertyKeys = [];
 
-    // 以下区段解析但只记数（相机 / 光照 / 自阴影暂不消费）
-    public int CameraKeyCount;
+    /// <summary>相机关键帧，文件顺序（无相机区时为空）。</summary>
+    public List<VmdCameraKey> CameraKeys = [];
+
+    // 以下区段解析但只记数（光照 / 自阴影暂不消费）
     public int LightKeyCount;
     public int SelfShadowKeyCount;
 
@@ -68,6 +88,9 @@ public sealed class VmdMotion
     public int BoneSectionBytes;
     public int MorphSectionOffset;
     public int MorphSectionBytes;
+
+    /// <summary>camera 分区起点（= 键数据首字节，不含 count 字段）。无该区时为 0。</summary>
+    public int CameraSectionOffset;
 
     /// <summary>property 分区起点（= 键数据首字节，不含 count 字段）。无该区时为 0。</summary>
     public int PropertySectionOffset;
@@ -143,11 +166,13 @@ public static class VmdParser
         offset += motion.MorphSectionBytes;
 
         // 有些 VMD 没有 camera/light 区
+        uint cameraCount = 0;
         if (data.Length - offset != 0)
         {
-            motion.CameraKeyCount = checked((int)ReadU32(data, ref offset));
-            RequireAvailable(data, offset, motion.CameraKeyCount * CameraKeyFrameBytes, "camera 关键帧区越界");
-            offset += motion.CameraKeyCount * CameraKeyFrameBytes;
+            cameraCount = ReadU32(data, ref offset);
+            motion.CameraSectionOffset = offset;
+            RequireAvailable(data, offset, checked((int)cameraCount) * CameraKeyFrameBytes, "camera 关键帧区越界");
+            offset += checked((int)cameraCount) * CameraKeyFrameBytes;
 
             motion.LightKeyCount = checked((int)ReadU32(data, ref offset));
             RequireAvailable(data, offset, motion.LightKeyCount * LightKeyFrameBytes, "light 关键帧区越界");
@@ -220,6 +245,27 @@ public static class VmdParser
             uint frame = ReadU32(data, ref offset);
             float weight = ReadF32(data, ref offset);
             motion.MorphKeys.Add(new VmdMorphKey(name, nameRaw, frame, weight));
+        }
+
+        // camera 区（有该区时 CameraSectionOffset != 0；结构扫描已校验过键区长度）
+        if (motion.CameraSectionOffset != 0)
+        {
+            offset = motion.CameraSectionOffset;
+            motion.CameraKeys.Capacity = (int)cameraCount;
+            for (uint i = 0; i < cameraCount; i++)
+            {
+                uint frame = ReadU32(data, ref offset);
+                float distance = ReadF32(data, ref offset);
+                var target = new Vector3(ReadF32(data, ref offset), ReadF32(data, ref offset), ReadF32(data, ref offset));
+                var rot = new Vector3(ReadF32(data, ref offset), ReadF32(data, ref offset), ReadF32(data, ref offset));
+                var interp = new byte[24];
+                for (int k = 0; k < 24; k++) interp[k] = data[offset++];
+                // fov 原始为 u32 度数；转 float 度数保语义（再转弧度是轨道构建的事）
+                float fovDeg = ReadU32(data, ref offset);
+                offset++;   // perspective 标志（0 = 透视），不消费
+
+                motion.CameraKeys.Add(new VmdCameraKey(frame, distance, target, rot, fovDeg, interp));
+            }
         }
 
         return motion;

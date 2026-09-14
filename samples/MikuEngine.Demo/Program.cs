@@ -22,6 +22,7 @@ using MikuEngine.Engine;
 //   动画（Motion/ 下存在对应 VMD 时自动加载）：
 //     动作+IK.vmd（骨动效 + 足ＩＫ/つま先ＩＫ 目标 + 表情，单层播放）
 //     —— 原 Motion.vmd + Lips/Eyes/Facial 四层组合保留在 motionFiles 的注释里，需要时一行切回
+//     镜头.vmd（相机动画：六通道贝塞尔驱动视图，与舞曲同游标；C 开关）
 //   空格 ：暂停/播放 | ←/→ ：∓1 帧 | ↑/↓ ：帧率 ±6 | F ：回首帧
 //   E    ：轮廓线开关 | 1/2/0 ：自阴影 关/自阴影/自阴影+床影 | S ：自阴影风格循环
 //   P    ：物理模拟开关（Stage 1 S1；裙/发/胸随动效摆动，OFF 回纯动画，OFF→ON 自动 snap）
@@ -117,6 +118,10 @@ var input = new OrbitInputController(camera, enabled: true);
 
 // VMD 动画（Step 5d-4 MmdTimeline）：Motion/ 下的 VMD 自动加载为单层时间轴
 MmdTimeline? timeline = null;
+
+// VMD 相机动画：Motion/镜头.vmd（纯相机 VMD）→ 相机轨道，逐帧驱动视图（C 键开关）
+MmdCameraTrack? cameraTrack = null;
+bool cameraVmdEnabled = true;
 
 // Stage 1 S1 物理总开关（P 键切换）。默认开（MMD 行为：物理常开）；
 // --ik-smoke 隔离验收时默认关，避免物理写回污染 IK 诊断读数；
@@ -230,6 +235,32 @@ window.Load += () =>
             Console.WriteLine("[Demo] 没有任何可用的 VMD 层，动画不可用");
             timeline = null;
         }
+
+        // ── VMD 相机动画（Motion/镜头.vmd，纯相机 VMD）───────────────────
+        // 与舞曲同一时间轴游标（timeline.CurrentFrame）采样，天然与动作同步；
+        // --smoke / --xform-smoke 不加载（同上，避免污染帧间差异校验和）。
+        string? cameraVmdPath = FindMotionFile("镜头.vmd");
+        if (cameraVmdPath is not null)
+        {
+            try
+            {
+                var camVmd = VmdParser.Parse(File.ReadAllBytes(cameraVmdPath));
+                var camAnim = MmdAnimation.FromVmd(camVmd);
+                if (camAnim.CameraTrack is { IsEmpty: false } ct)
+                {
+                    cameraTrack = ct;
+                    Console.WriteLine($"[Demo] 相机动画：{Path.GetFileName(cameraVmdPath)} | {ct.Frames.Length} 键 | 帧 {ct.Frames[0]}..{ct.Frames[^1]}（C 键开关）");
+                }
+                else
+                {
+                    Console.WriteLine($"[Demo] {Path.GetFileName(cameraVmdPath)} 没有相机关键帧，相机保持轨道模式");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Demo] 相机动画加载失败：{ex.Message}");
+            }
+        }
     }
 
     // ── 输入：平台层只做"原生事件 → 控制器方法"转发 ──────────────────────
@@ -298,6 +329,11 @@ window.Load += () =>
             {
                 timeline.Seek(timeline.StartFrame);
                 Console.WriteLine($"[Demo] 时间轴帧：{timeline.CurrentFrame:F1}（首帧）");
+            }
+            else if (cameraTrack != null && key == Keys.C)
+            {
+                cameraVmdEnabled = !cameraVmdEnabled;
+                Console.WriteLine($"[Demo] 相机动画：{(cameraVmdEnabled ? "开（VMD 独占视图）" : "关（回到轨道相机）")}");
             }
             else if (key == Keys.G)
             {
@@ -401,6 +437,8 @@ window.Load += () =>
     Console.WriteLine("[Demo] 操作: 左键=旋转 | 右键=平移 | 滚轮=缩放 | E=轮廓线 | 1/2/0=自阴影模式 | S=自阴影风格");
     Console.WriteLine("[Demo] 播放: 空格=暂停/播放 | ←/→=∓1帧 | ↑/↓=帧率±6 | F=首帧");
     Console.WriteLine("[Demo] 物理: P=物理模拟开关 | G=地面碰撞开关 | H=物理后付与开关（P/G 默认开）");
+    if (cameraTrack != null)
+        Console.WriteLine("[Demo] 相机: C=相机动画开关（镜头.vmd，开启时 VMD 独占视图，鼠标操作无效）");
     Console.WriteLine("[Demo] 模型变换（MMD モデル操作，全ての親 为基准，操作中心留在原地）:");
     Console.WriteLine("[Demo]   移動: I/K=Y∓ | J/L=X∓ | U/O=Z∓（0.5/步，Shift=0.1 微调）");
     Console.WriteLine("[Demo]   回転: Alt+I/K=X | Alt+J/L=Y | Alt+U/O=Z（∓15°/步，YXZ 序）");
@@ -473,6 +511,14 @@ window.Render += dt =>
     int h = window.FramebufferSize.Y;
     camera.Aspect = h > 0 ? (float)w / h : 1f;
 
+    // ── VMD 相机动画：与时间轴同一游标采样 → 喂姿态 → VMD 独占视图 ──────
+    // 先 SetVmdDriven（备份 orbit fov）再 SetVmdPose（写入 VMD fov）；关闭时恢复。
+    // 采样是帧号的纯函数，seek/暂停/回卷自动正确；无时间轴时停在轨道首键姿态。
+    bool driveCamera = cameraTrack != null && cameraVmdEnabled;
+    camera.SetVmdDriven(driveCamera);
+    if (driveCamera && cameraTrack!.Sample(timeline?.CurrentFrame ?? 0, out var camPose))
+        camera.SetVmdPose(camPose.Target, camPose.RotationEuler, camPose.Distance, camPose.Fov);
+
     Span<float> viewProj = stackalloc float[16];
     Span<float> view = stackalloc float[16];
     camera.ComputeViewProj(viewProj);
@@ -481,7 +527,8 @@ window.Render += dt =>
     var frame = FrameUniforms.Default();
     frame.ViewProj = FromColumnMajor(viewProj);
     frame.View = FromColumnMajor(view);
-    frame.CameraPosition = new System.Numerics.Vector4(camera.Position, 0f);
+    // 视差量必须用真实拍摄点：VMD 驱动时 orbit 的 Position 与取景无关
+    frame.CameraPosition = new System.Numerics.Vector4(camera.GetEyePosition(), 0f);
 
     if (model != null)
     {
@@ -572,6 +619,11 @@ window.Render += dt =>
             Console.WriteLine($"[anim-smoke] 渲染帧 {animSmokeFrame:D3} | 时间轴帧 {timeline.CurrentFrame:F1} | " +
                               $"Visible={timeline.Mixer.Visible} | 活跃 morph {activeMorphs} | " +
                               $"センター 位移 {offsetLen:F2} / 旋转 {angleDeg:F1}°");
+            if (cameraTrack != null && cameraVmdEnabled && cameraTrack.Sample(timeline.CurrentFrame, out var poseDbg))
+                Console.WriteLine($"[anim-smoke]   相机: VmdDriven={camera.VmdDriven} | " +
+                                  $"target=({poseDbg.Target.X:F2},{poseDbg.Target.Y:F2},{poseDbg.Target.Z:F2}) | " +
+                                  $"euler=({poseDbg.RotationEuler.X:F3},{poseDbg.RotationEuler.Y:F3},{poseDbg.RotationEuler.Z:F3}) | " +
+                                  $"dist={poseDbg.Distance:F2} | fov={poseDbg.Fov * 180f / MathF.PI:F1}°");
         }
 
         if (shadow != null && shadow.Enabled)

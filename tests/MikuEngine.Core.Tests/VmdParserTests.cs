@@ -155,7 +155,7 @@ public class VmdParserTests
         var c = g.GetProperty("counts");
         Assert.Equal(c.GetProperty("bone").GetInt32(), m.BoneKeys.Count);
         Assert.Equal(c.GetProperty("morph").GetInt32(), m.MorphKeys.Count);
-        Assert.Equal(c.GetProperty("camera").GetInt32(), m.CameraKeyCount);
+        Assert.Equal(c.GetProperty("camera").GetInt32(), m.CameraKeys.Count);
         Assert.Equal(c.GetProperty("light").GetInt32(), m.LightKeyCount);
         Assert.Equal(c.GetProperty("selfShadow").GetInt32(), m.SelfShadowKeyCount);
         Assert.Equal(c.GetProperty("property").GetInt32(), m.PropertyKeyCount);

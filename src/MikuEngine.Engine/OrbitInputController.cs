@@ -26,6 +26,12 @@ public sealed class OrbitInputController
     public bool Enabled { get; set; } = true;
 
     /// <summary>
+    /// 是否允许输入响应（<see cref="Enabled"/> 且相机未被 VMD 姿态驱动）。
+    /// VMD 相机动画独占视图时，orbit/pan/zoom 操作的是一组与取景无关的参数，一律短路。
+    /// </summary>
+    public bool InputAllowed => Enabled && !_camera.VmdDriven;
+
+    /// <summary>
     /// Orbit 旋转灵敏度（弧度 / 像素）。默认 0.0025 ≈ 0.14°/px。
     /// 360° 旋转约需 2513px 水平拖拽。
     /// </summary>
@@ -82,7 +88,7 @@ public sealed class OrbitInputController
     /// <summary>指针按下（鼠标按键 / 触控点）。</summary>
     public void OnPointerDown(int pointerId, float x, float y, PointerButton button = PointerButton.None)
     {
-        if (!Enabled) return;
+        if (!InputAllowed) return;
 
         _pointers[pointerId] = new Vector2(x, y);
 
@@ -112,7 +118,7 @@ public sealed class OrbitInputController
     /// <summary>指针移动。</summary>
     public void OnPointerMove(int pointerId, float x, float y)
     {
-        if (!Enabled) return;
+        if (!InputAllowed) return;
         if (!_pointers.TryGetValue(pointerId, out var prev)) return;
 
         var current = new Vector2(x, y);
@@ -170,7 +176,7 @@ public sealed class OrbitInputController
     /// <summary>指针抬起。</summary>
     public void OnPointerUp(int pointerId)
     {
-        if (!Enabled) return;
+        if (!InputAllowed) return;
 
         _pointers.Remove(pointerId);
 
@@ -197,7 +203,7 @@ public sealed class OrbitInputController
     /// <summary>滚轮事件。deltaY > 0 向上滚（拉近），deltaY < 0 向下滚（推远）。</summary>
     public void OnScroll(float deltaY)
     {
-        if (!Enabled) return;
+        if (!InputAllowed) return;
         _camera.Zoom(-deltaY * WheelZoomSensitivity);
     }
 

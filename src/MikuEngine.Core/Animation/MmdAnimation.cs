@@ -293,6 +293,12 @@ public sealed class MmdAnimation
     /// <summary>表示枠轨道（整模型可见性）。空轨道 ⇒ 恒可见。</summary>
     public MmdPropertyTrack PropertyTrack = new();
 
+    /// <summary>
+    /// 相机轨道（整场景量，无模型绑定）。空轨道 / null ⇒ 无相机动效。
+    /// 与 property 不同：相机键<b>参与</b>播放区间计算（纯相机 VMD 也要可播）。
+    /// </summary>
+    public MmdCameraTrack? CameraTrack;
+
     /// <summary>首键帧号（所有轨道取并），无轨道时为 0。</summary>
     public double StartFrame;
 
@@ -352,13 +358,24 @@ public sealed class MmdAnimation
 
         animation.PropertyTrack = BuildPropertyTrack(vmd.PropertyKeys);
 
-        // 播放区间只由骨 / morph 轨道决定：property 是叠加在姿态上的布尔量，
+        animation.CameraTrack = vmd.CameraKeys.Count > 0
+            ? MmdCameraTrack.FromVmd(vmd.CameraKeys)
+            : new MmdCameraTrack();
+
+        // 播放区间只由骨 / morph / 相机轨道决定：property 是叠加在姿态上的布尔量，
         // 不是姿态来源，因此它的键不应延长 / 缩短可播放的动效范围。
+        // 相机键纳入：相机驱动的是同一个时间轴游标，纯相机 VMD（无骨/表情键）也要可播。
         double min = double.MaxValue, max = double.MinValue;
         foreach (var t in boneTracks)
             if (!t.IsEmpty) { min = System.Math.Min(min, t.Frames[0]); max = System.Math.Max(max, t.Frames[^1]); }
         foreach (var t in morphTracks)
             if (!t.IsEmpty) { min = System.Math.Min(min, t.Frames[0]); max = System.Math.Max(max, t.Frames[^1]); }
+        if (!animation.CameraTrack.IsEmpty)
+        {
+            var ct = animation.CameraTrack;
+            min = System.Math.Min(min, ct.Frames[0]);
+            max = System.Math.Max(max, ct.Frames[^1]);
+        }
         if (max >= min)
         {
             animation.StartFrame = min;
@@ -397,6 +414,8 @@ public sealed class MmdAnimation
             MorphTracks = morphs.ToArray(),
             // 表示枠是整模型量，不做「该模型是否存在对应骨」的过滤，原样透传（数组共享）
             PropertyTrack = PropertyTrack,
+            // 相机同为整场景量，原样透传（轨道实例共享）
+            CameraTrack = CameraTrack,
         };
     }
 

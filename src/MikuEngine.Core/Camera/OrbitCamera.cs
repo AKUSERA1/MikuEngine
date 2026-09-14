@@ -50,6 +50,62 @@ public sealed class OrbitCamera
     public float MinZ = 0.05f;
     public float MaxZ = FarCap;
 
+    // ─────────────────────────────────────────────────────────
+    // VMD 相机驱动
+    //
+    // MMD 相机是「注视点」模型：看向 target，朝向由 euler 决定，沿自身 forward 后退 distance
+    // （distance 为负）。驱动期间 orbit 的 alpha/beta/radius 不被触碰，fov 会被 VMD 轨道
+    // 逐帧改写（进出驱动态时备份/恢复），输入控制器应短路 orbit/pan/zoom。
+    // ─────────────────────────────────────────────────────────
+
+    /// <summary>true = 由 VMD 相机姿态驱动视图（<see cref="SetVmdPose"/> 喂入）。
+    /// 切换时备份 / 恢复 orbit 的 fov（VMD 相机动画会改写 fov）。</summary>
+    public bool VmdDriven { get; private set; }
+
+    private Vector3 _vmdTarget;
+    private Vector3 _vmdRotation;   // euler 弧度（VMD 原始值）
+    private float _vmdDistance;
+    private float _savedFov = MathF.PI / 4f;
+
+    /// <summary>进入 / 退出 VMD 驱动态。幂等：重复设置同一状态为 no-op。</summary>
+    public void SetVmdDriven(bool enabled)
+    {
+        if (enabled == VmdDriven) return;
+        if (enabled) _savedFov = Fov;
+        else Fov = _savedFov;
+        VmdDriven = enabled;
+    }
+
+    /// <summary>喂入下一帧采样的 VMD 相机姿态（fov 直接驱动投影）。</summary>
+    public void SetVmdPose(Vector3 target, Vector3 rotationEuler, float distance, float fov)
+    {
+        _vmdTarget = target;
+        _vmdRotation = rotationEuler;
+        _vmdDistance = distance;
+        Fov = fov;
+    }
+
+    /// <summary>
+    /// VMD 姿态的视点：eye = target + q·(0,0,1)·distance。
+    ///
+    /// euler 三轴<b>取负</b>后构建四元数（babylon-mmd 用 RotationYawPitchRoll(-ry,-rx,-rz)；
+    /// System.Numerics 的 CreateFromYawPitchRoll 与其 yaw/pitch/roll 语义一致）。
+    /// forward = q·(0,0,1)（旋转矩阵第 3 列），distance 为负 ⇒ eye 落在注视点后方。
+    /// </summary>
+    private Vector3 VmdEye()
+    {
+        var q = Quaternion.CreateFromYawPitchRoll(-_vmdRotation.Y, -_vmdRotation.X, -_vmdRotation.Z);
+        var m = Matrix4x4.CreateFromQuaternion(q);
+        var forward = new Vector3(m.M13, m.M23, m.M33);
+        return _vmdTarget + forward * _vmdDistance;
+    }
+
+    /// <summary>
+    /// 视差量（高光 / rim / 球面贴图等着色项的相机位置）：
+    /// VMD 驱动时必须取 <see cref="VmdEye"/>，orbit 的 <see cref="Position"/> 与真实拍摄点无关。
+    /// </summary>
+    public Vector3 GetEyePosition() => VmdDriven ? VmdEye() : Position;
+
     public OrbitCamera(float alpha, float beta, float radius, Vector3 target, float fov = MathF.PI / 4f)
     {
         Alpha = alpha;
@@ -115,13 +171,17 @@ public sealed class OrbitCamera
     private void UpdateFarFromRadius()
     {
         const float margin = 600f;
-        Far = MathF.Min(FarCap, MathF.Max(FarMin, Radius * 12f + margin));
+        float r = EffectiveRadius();
+        Far = MathF.Min(FarCap, MathF.Max(FarMin, r * 12f + margin));
     }
 
     private void UpdateNearFromRadius()
     {
-        Near = MathF.Min(NearMax, MathF.Max(NearMin, Radius / 50f));
+        Near = MathF.Min(NearMax, MathF.Max(NearMin, EffectiveRadius() / 50f));
     }
+
+    /// <summary>近/远裁剪面的推算基准：VMD 驱动时 orbit 的 Radius 与取景无关，改用 |distance|。</summary>
+    private float EffectiveRadius() => VmdDriven ? MathF.Abs(_vmdDistance) : Radius;
 
     // ─────────────────────────────────────────────────────────
     // 矩阵输出：列主序 float[16]，直接喂给 GLSL mat4
@@ -131,8 +191,38 @@ public sealed class OrbitCamera
 
     public void WriteViewMatrix(Span<float> m)
     {
+        if (VmdDriven)
+        {
+            WriteVmdViewMatrix(m);
+            return;
+        }
         Vector3 eye = Position;
         WriteLookAt(m, eye, Target, Vector3.UnitY);
+    }
+
+    /// <summary>
+    /// VMD 相机视图：View = Rᵀ · T(−eye)，直接由四元数旋转基铺出，<b>不走 lookAt</b>。
+    ///
+    /// 朝向本来就由 euler 决定、不依赖 eye→target 连线；position-baked 轨道全帧 distance=0
+    /// （eye == target），lookAt 的归一化会退化成全零基，而 Rᵀ·T 形式对 d=0 天然稳健。
+    /// 列主序输出，与 <see cref="WriteLookAt"/> 同一约定（col0=right、col1=up、col2=forward）。
+    /// </summary>
+    private void WriteVmdViewMatrix(Span<float> o)
+    {
+        var q = Quaternion.CreateFromYawPitchRoll(-_vmdRotation.Y, -_vmdRotation.X, -_vmdRotation.Z);
+        var r = Matrix4x4.CreateFromQuaternion(q);
+        Vector3 forward = new(r.M13, r.M23, r.M33);
+        Vector3 eye = _vmdTarget + forward * _vmdDistance;
+
+        // R 的三列 = right(M11,M21,M31) / up(M12,M22,M32) / forward(M13,M23,M33)；
+        // view 的 col0 = R 的第 0 行 = (right.X, up.X, forward.X)，其余同构。
+        o[0] = r.M11; o[1] = r.M12; o[2] = r.M13; o[3] = 0f;
+        o[4] = r.M21; o[5] = r.M22; o[6] = r.M23; o[7] = 0f;
+        o[8] = r.M31; o[9] = r.M32; o[10] = r.M33; o[11] = 0f;
+        o[12] = -(r.M11 * eye.X + r.M21 * eye.Y + r.M31 * eye.Z);
+        o[13] = -(r.M12 * eye.X + r.M22 * eye.Y + r.M32 * eye.Z);
+        o[14] = -(r.M13 * eye.X + r.M23 * eye.Y + r.M33 * eye.Z);
+        o[15] = 1f;
     }
 
     /// <summary>
