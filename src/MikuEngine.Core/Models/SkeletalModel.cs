@@ -308,16 +308,16 @@ public sealed class SkeletalModel
             MorphWeights[i] = 0f;
     }
 
-    // ── 模型面板变换（MMD モデル操作）────────────────────────────────────
+    // ── 模型变换 ────────────────────────────────────
     //
-    // MMD 语义（对 TestModels 两套标准模型实测 + 社区资料互证）：
+    // MMD 语义：
     //   * 全ての親 与 操作中心 是**并列的根骨**（互不隶属），身体挂在 全ての親 之下；
-    //   * 模型面板的 移動/回転 作用于 全ての親（登録时烘焙为其关键帧）——因此物理刚体
+    //   * 整个模型级别的 移動/回転 作用于 全ての親（登録时烘焙为其关键帧）——因此物理刚体
     //     （kinematic 目标取骨世界矩阵）与 IK（内部跑全量 FK）都随之跟随，与 MMD 一致；
     //   * 操作中心 不在变形链上（视点追踪的锚点）——只要变换只施加在 全ての親 上，
     //     它天然「始终留在原地」，无需任何特殊处理；
     //   * 拡大率（缩放）**不在此处**：它由渲染层在蒙皮之后整体施加（见 GlesModelRenderer），
-    //     保证非均匀缩放（压成纸片）不污染刚体 / teleport 阈值 / 付与 / IK——物理解耦。
+    //     保证非均匀缩放（压成纸片等）不污染刚体 / teleport 阈值 / 付与 / IK——物理解耦。
     //
     // 注入方式：不写 LocalTranslations/LocalRotations（会与 VMD 轨道、ResetPose 互相污染、
     // 且需要逐帧重算），而是作为 全ての親 世界矩阵的**后乘因子 D** 在 RecomputeBone 里施加：
@@ -326,13 +326,13 @@ public sealed class SkeletalModel
     // 绑定姿势世界位置（标准模型 = 原点，此时 D = R · T(move)，与 MMD 的 S·R·T 语义对齐）。
     // 状态是**绝对值**（面板显示值），每帧从 D 重建，天然幂等、可随时归零、与动画共存。
 
-    /// <summary>面板「移動」偏移（模型空间，世界轴向）。绝对值，0 = 无偏移。</summary>
+    /// <summary>「移動」偏移（模型空间，世界轴向）。绝对值，0 = 无偏移。</summary>
     public Vector3 ModelTranslationOffset;
 
-    /// <summary>面板「回転」角（弧度，MMD 的 YXZ 欧拉序，见 <see cref="MmdMath.EulerOrderYxz"/>）。绝对值。</summary>
+    /// <summary>「回転」角（弧度，MMD 的 YXZ 欧拉序，见 <see cref="MmdMath.EulerOrderYxz"/>）。绝对值。</summary>
     public Vector3 ModelRotationAngles;
 
-    /// <summary>全ての親 骨骼索引（面板变换载体），-1 = 模型没有此骨（此时面板 TR 由渲染层根矩阵兜底）。</summary>
+    /// <summary>全ての親 骨骼索引，-1 = 模型没有此骨（此时由渲染层根矩阵兜底）。</summary>
     public int RootTransformBoneIndex { get; private set; } = -1;
 
     /// <summary>操作中心 骨骼索引（视点/相机锚点，**不参与**任何模型变换），-1 = 无。</summary>

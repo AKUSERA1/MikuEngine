@@ -36,7 +36,7 @@ public struct FrameUniforms
         ViewProj = Matrix4x4.Identity,
         View = Matrix4x4.Identity,
         CameraPosition = new Vector4(0f, 0f, 1f, 0f),
-        // 注意：以下三个是 PmxEditor 的默认值（反编译 PmxEditorCore L12531-12535，InitializeDevice）：
+        // 注意：以下三个是 PmxEditor 的默认值（PmxEditorCore L12531-12535，InitializeDevice）：
         //   m_manager.Ambient = System.Drawing.Color.White;
         //   m_manager.SetLightDirection(new Vector3(-0.5f, -1f, 0.5f));   ← Z 是 +0.5
         //   m_manager.SetLightColor(new Color4(0.5f, 0.5f, 0.5f));        ← 0.5 灰，不是 1
@@ -109,7 +109,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
     public Core.Models.SkeletalModel Model => _model;
 
     /// <summary>
-    /// モデル操作「拡大率」（MMD 模型面板的 X/Y/Z 独立缩放）。**与物理解耦**：
+    /// X/Y/Z 独立缩放，**与物理解耦**：
     /// 只进渲染层根矩阵（蒙皮之后整体施加），骨骼 / 刚体 / IK / 付与 全部保持 bind 尺度 ——
     /// 模型可以被压成纸片或放大成巨人，物理模拟照常。默认 (1,1,1)。
     /// </summary>
