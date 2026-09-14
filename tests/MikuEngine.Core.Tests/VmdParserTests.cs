@@ -22,7 +22,7 @@ namespace MikuEngine.Core.Tests;
 /// 引擎内部 PMX/VMD 统一用 .NET 932，名字绑定自洽；模仿 babylon 的 U+FFFD 反而破坏绑定。
 /// 测试只要求：golden 名字无 U+FFFD 时（即两边都干净解码），解码结果必须一致。
 ///
-/// golden 再生：node TestData/gen_vmd_golden.mjs &lt;vmd&gt; &lt;out.json&gt;
+/// golden 再生：node TestData/gen_vmd_golden.mjs <vmd> <out.json>
 /// </summary>
 public class VmdParserTests
 {

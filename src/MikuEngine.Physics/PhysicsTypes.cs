@@ -61,7 +61,7 @@ public sealed class RigidBodyDef
     /// </summary>
     public bool Aligned { get; init; }
 
-    //TODO: 共享物理世界
+    //TODO: 共享物理世界，模型间可以碰撞
     /// <summary>
     /// 预留字段位：多模型共享 world 时的模型组 id。当前单 world 单模型，不启用。
     /// </summary>
