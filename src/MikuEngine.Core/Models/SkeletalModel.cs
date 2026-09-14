@@ -357,6 +357,51 @@ public sealed class SkeletalModel
     private Matrix4x4 _panelMatrix = Matrix4x4.Identity;
     private int _panelCarrier = -1;
 
+    // ── 外部親（outside parent）────────────────────────────────────────
+    //
+    // MMD 官方语义：
+    // 绑定生效时，<b>所有无父骨</b>挂到亲骨世界矩阵下：
+    //   world(root) = local' × RootParent   （行主序；列主序即 RootParent × local）
+    //   local' = local 且平移分量先减去 <see cref="_primaryRootBind"/> —— 首个无父骨的
+    //   绑定姿势世界位置。减掉后首个无父骨恰好「坐」在亲骨上，其余无父骨保持与它的
+    //   相对布局；不减则模型原点（而非全ての親）跑到亲骨上，绑在网中心的道具会整体偏移。
+    //
+    // 进入路径是骨骼而非模型变换（与 MMD 一致）：物理在模型空间跑，绑在手上的扇子
+    // 其挂件重力仍然朝下。
+    // RootParent 矩阵由外部（MmdExternalParentController）每帧写：亲模型先解算，
+    // 子模型 SetRootParent 后再做自己的 FK。
+
+    /// <summary>
+    /// 外部親根矩阵（模型空间，行主序）。null = 普通骨架（根骨锚在模型原点）。
+    /// 由 <see cref="SetRootParent"/> 写入；<see cref="RecomputeBone"/> 在 FK 时消费。
+    /// </summary>
+    public Matrix4x4? RootParent { get; private set; }
+
+    /// <summary>首个无父骨（全ての親 按约定）的绑定姿势世界平移；挂根父时从每个无父骨的局部平移中减去。</summary>
+    private Vector3 _primaryRootBind = Vector3.Zero;
+
+    /// <summary>
+    /// 挂 / 摘外部親根矩阵（MMD 外部親绑定的模型侧入口）。
+    /// 传入矩阵在下一轮 <see cref="UpdateWorldMatrices"/> 生效（不复制，读字段）。
+    /// </summary>
+    public void SetRootParent(Matrix4x4? matrix)
+    {
+        RootParent = matrix;
+        if (matrix is null) return;
+
+        // 首个无父骨的绑定姿势世界平移（PMX 顺序里第一个 parent < 0 的骨）。
+        // 从 InverseBind 反推绑定世界矩阵 —— 与 ApplyModelTransform 的 pivot 同法，
+        // 父链非单位阵时依旧正确。
+        _primaryRootBind = Vector3.Zero;
+        for (int i = 0; i < BoneCount; i++)
+        {
+            if (ParentIndices[i] >= 0) continue;
+            if (Matrix4x4.Invert(InverseBind[i], out Matrix4x4 bindWorld))
+                _primaryRootBind = bindWorld.Translation;
+            break;
+        }
+    }
+
     /// <summary>加载后调用一次：按名字定位 全ての親 / 操作中心。</summary>
     public void ResolveModelTransformBones()
     {
@@ -686,9 +731,18 @@ public sealed class SkeletalModel
         local.Translation = translation;
 
         int parent = ParentIndices[i];
-        WorldMatrices[i] = parent >= 0 ? local * WorldMatrices[parent] : local;
+        if (parent >= 0)
+            WorldMatrices[i] = local * WorldMatrices[parent];
+        else if (RootParent is Matrix4x4 rootParent)
+        {
+            // 外部親：首个无父骨坐上亲骨，其余无父骨保持相对布局（见 SetRootParent 上方注释）
+            local.Translation -= _primaryRootBind;
+            WorldMatrices[i] = local * rootParent;
+        }
+        else
+            WorldMatrices[i] = local;
 
-        // 模型面板变换（MMD 移動/回転）：作为 全ての親 世界矩阵的后乘因子注入（见
+        // 模型变换（MMD 移動/回転）：作为 全ての親 世界矩阵的后乘因子注入（见
         // ApplyModelTransform 的说明）。每次都从「局部 × 父级」重新构建再后乘 ⇒ 天然幂等，
         // 不会累积；IK 内部跑全量 FK、物理读 WorldMatrices，都自动跟随，操作中心不在
         // 全ての親 子树内，因此始终留在原地。

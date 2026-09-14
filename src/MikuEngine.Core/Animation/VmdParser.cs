@@ -73,7 +73,10 @@ public sealed class VmdMotion
     /// <summary>相机关键帧，文件顺序（无相机区时为空）。</summary>
     public List<VmdCameraKey> CameraKeys = [];
 
-    // 以下区段解析但只记数（光照 / 自阴影暂不消费）
+    /// <summary>外部親绑定键，文件顺序。来自骨键中「名字含冒号」的键（见 MmdExternalParentKey）。</summary>
+    public List<MmdExternalParentKey> ExternalParentKeys = [];
+
+    //TODO 以下区段解析但只记数（光照 / 自阴影暂不消费）
     public int LightKeyCount;
     public int SelfShadowKeyCount;
 
@@ -152,7 +155,7 @@ public static class VmdParser
         (motion.ModelName, motion.ModelNameRaw) = DecodeName(data, offset, ModelNameBytes);
         offset += ModelNameBytes;
 
-        // —— 结构校验 + 分区定位（对应 CheckedCreate 的顺序：bone→morph→camera→light→selfShadow→property）——
+        // —— 结构校验 + 分区定位 ——
         uint boneCount = ReadU32(data, ref offset);
         motion.BoneSectionOffset = offset;
         motion.BoneSectionBytes = checked((int)boneCount) * BoneKeyFrameBytes;
@@ -233,6 +236,17 @@ public static class VmdParser
             var interp = new byte[64];
             for (int k = 0; k < 64; k++) interp[k] = data[offset++];
 
+            // 「外部親」键拦截：MMD 语义 —— 骨键的 15B 骨名字段含冒号（全角「：」/ 半角「:」）即
+            // 外部親绑定键，字段本身就是「親モデル名:親ボーン名」，pos/rot = 叠加偏移。
+            // MMD 帧面板里这类键显示为「外部親」。不进 BoneKeys，转成外部親绑定键。
+            if (name.Contains('：') || name.Contains(':'))
+            {
+                (string parentModel, string parentBone) = SplitExternalParentSpec(name);
+                motion.ExternalParentKeys.Add(new MmdExternalParentKey(
+                    (int)frame, parentModel, parentBone, pos, rot));
+                continue;
+            }
+
             motion.BoneKeys.Add(new VmdBoneKey(name, nameRaw, frame, pos, rot, interp));
         }
 
@@ -301,6 +315,17 @@ public static class VmdParser
         var raw = new byte[len];
         Array.Copy(d, offset, raw, 0, len);
         return (Sjis.GetString(d, offset, len), raw);
+    }
+
+    /// <summary>
+    /// 切分外部親键的「親モデル名:親ボーン名」：优先全角冒号「：」（MMD 作者是日本人），退回半角「:」。切在<b>第一个</b>冒号上；任一侧为空 = 解除绑定键。
+    /// </summary>
+    private static (string ParentModel, string ParentBone) SplitExternalParentSpec(string spec)
+    {
+        int idx = spec.IndexOf('：');
+        if (idx < 0) idx = spec.IndexOf(':');
+        if (idx < 0) return ("", "");
+        return (spec[..idx].Trim(), spec[(idx + 1)..].Trim());
     }
 
     private static void RequireAvailable(byte[] d, int offset, int bytes, string message)

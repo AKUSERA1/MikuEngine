@@ -38,6 +38,11 @@ using MikuEngine.Engine;
 //               验收标准是「全程无异常 + 各层确实在驱动模型」。
 // --xform-smoke：无人值守模型变换验收（MMD モデル操作端到端：TR 注入 全ての親 / 操作中心不动 /
 //               拡大率物理解耦 / 重置幂等）。
+// --ext-smoke / --ext-model：多模型 + 外部親（MMD outside parent）验收/联调。
+//               --ext-model=<pmx> 加载第二模型（被绑定方），--ext-motion=<vmd> 子模型动效，
+//               --ext-bind-frame=<N> 程序化注入绑定键（默认 1945），--ext-smoke 无头打印
+//               「子模型全ての親 vs 亲骨」世界位置差验收绑定/瞬移/跟随。
+// --motion=<vmd>：覆盖主模型默认动效文件名（Motion/ 下查找）。
 // ─────────────────────────────────────────────────────────────────────────
 
 // --smoke：无人值守自检。隐藏窗口跑 40 帧 → 强制开影模式 1 → 打印中间 RT 统计 → 退出。
@@ -79,7 +84,24 @@ string? ikBakeDumpPath = null;
     string? bArg = Array.Find(args, a => a.StartsWith("--ik-bake-dump=", StringComparison.Ordinal));
     if (bArg is not null) ikBakeDumpPath = bArg["--ik-bake-dump=".Length..];
 }
-bool headless = smoke || animSmoke || ikSmoke || xformSmoke;
+// --ext-smoke / --ext-model：多模型 + 外部親（MMD outside parent）。
+//   子模型与主模型共用一个时间轴游标（MMD 同一全局时间轴）；绑定键来自子模型 VMD 的
+//   外部親轨道，VMD 没有时按 --ext-bind-frame 程序化注入（亲模型注册名 固定「人物」）。
+bool extSmoke = Array.Exists(args, a => a == "--ext-smoke");
+string? extModelPath = FindArgValue(args, "--ext-model");
+string? extMotionPath = FindArgValue(args, "--ext-motion") ?? "扇子动作数据.vmd";
+string? extMotionOverride = FindArgValue(args, "--motion");
+int extBindFrame = 1945;
+{
+    string? fArg = FindArgValue(args, "--ext-bind-frame");
+    if (fArg is not null && int.TryParse(fArg, out int f)) extBindFrame = f;
+}
+string extParentName = FindArgValue(args, "--ext-parent-name") ?? "人物";
+string extParentBone = FindArgValue(args, "--ext-parent-bone") ?? "右手首";
+// --ext-smoke 的确定性帧序列：绑定前（地面）→ 绑定帧 → 绑定后（跟随）
+int[] extSmokePlan = [1, 1000, 1944, 1945, 1946, 2200, 2800];
+
+bool headless = smoke || animSmoke || ikSmoke || xformSmoke || extSmoke;
 string? pmxPath = Array.Find(args, a => !a.StartsWith("--", StringComparison.Ordinal)) ?? FindDefaultModel();
 if (pmxPath is null || !File.Exists(pmxPath))
 {
@@ -118,6 +140,12 @@ var input = new OrbitInputController(camera, enabled: true);
 
 // VMD 动画（Step 5d-4 MmdTimeline）：Motion/ 下的 VMD 自动加载为单层时间轴
 MmdTimeline? timeline = null;
+
+// ── 外部親（多模型）─────────────────────────────────────────────────
+// 第二模型（子，被绑定方）与其动效；动效与主时间轴同游标采样（MMD 同一全局时间轴）。
+GlesModelRenderer? extModel = null;
+MmdAnimation? extAnimation = null;
+MmdExternalParentController? extController = null;
 
 // VMD 相机动画：Motion/镜头.vmd（纯相机 VMD）→ 相机轨道，逐帧驱动视图（C 键开关）
 MmdCameraTrack? cameraTrack = null;
@@ -182,6 +210,72 @@ window.Load += () =>
     camera.Radius = MathF.Max(m.BoundsSize.Y * 2.0f, m.BoundsSize.Length() * 1.1f);
     camera.Beta = MathF.PI / 2.2f;
 
+    // ── 外部親（多模型）：加载子模型 + 其动效 + 绑定控制器 ───────────────
+    // 子模型不接物理（绑在手上的道具随骨走；物理留在模型空间的语义见控制器文档，
+    // 这里为验收确定性刻意关闭）。动效与主时间轴同游标采样，见 Render 段的「先亲后子」。
+    if (extModelPath is not null)
+    {
+        string? resolvedExtModel = ResolvePath(extModelPath);
+        if (resolvedExtModel is null || !File.Exists(resolvedExtModel))
+        {
+            Console.WriteLine($"[Demo] 外部親子模型不存在：{extModelPath}，跳过多模型");
+        }
+        else
+        {
+            try
+            {
+                extModel = GlesModelRenderer.LoadFromFile(device, resolvedExtModel);
+                extModel.ShadowZTexture = shadow!.ZTexture;
+                extModel.ShadowTexel = shadow.Texel;
+                extModel.ShadowNormalOffset = shadow.TexelWorld * 1.5f;
+                Console.WriteLine($"[Demo] 外部親子模型：{resolvedExtModel}（{extModel.Model.BoneCount} 骨）");
+
+                string? motionPath = ResolvePath(extMotionPath!) ?? FindMotionFile(Path.GetFileName(extMotionPath!));
+                if (motionPath is null)
+                {
+                    Console.WriteLine($"[Demo] 子模型动效不存在：{extMotionPath}（子模型保持绑定姿势）");
+                }
+                else
+                {
+                    var vmd = VmdParser.Parse(File.ReadAllBytes(motionPath));
+                    var expanded = MmdAnimation.FromVmd(vmd);
+                    if (expanded.ExternalParentTrack.IsEmpty)
+                    {
+                        // VMD 没有外部親键（MMD 里由用户在帧面板打键）→ 按参数程序化注入。
+                        // 语义与 MMD 面板打键一致：第 N 帧起绑定到 亲模型:亲骨，offset=0。
+                        expanded.ExternalParentTrack = MmdExternalParentTrack.FromVmd(
+                            [new MmdExternalParentKey(extBindFrame, extParentName, extParentBone,
+                                System.Numerics.Vector3.Zero, System.Numerics.Quaternion.Identity)]);
+                        Console.WriteLine($"[Demo] 注入外部親键：帧 {extBindFrame} → {extParentName}:{extParentBone}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[Demo] 子模型 VMD 自带外部親轨道：{expanded.ExternalParentTrack.Keys.Length} 键");
+                    }
+
+                    extAnimation = expanded.Bind(extModel.Model);
+                    int fanRoot = extModel.Model.FindBone("全ての親");
+                    Console.WriteLine($"[Demo] 子模型动效：{Path.GetFileName(motionPath)} | 帧 {expanded.StartFrame:F0}..{expanded.EndFrame:F0} | 全ての親={(fanRoot >= 0 ? fanRoot.ToString() : "无")}");
+                }
+
+                extController = new MmdExternalParentController();
+                extController.Register(extParentName, model.Model);            // 亲模型（人物）
+                extController.Register("子", extModel.Model, extAnimation);    // 子模型（扇子）
+                Console.WriteLine($"[Demo] 外部親控制器：亲模型注册名「{extParentName}」| 亲骨「{extParentBone}」");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Demo] 外部親子模型加载失败：{ex.Message}");
+                extModel?.Dispose();
+                extModel = null;
+            }
+        }
+    }
+    else if (extSmoke)
+    {
+        Console.WriteLine("[Demo] --ext-smoke 需要 --ext-model=<pmx>，本次跳过多模型");
+    }
+
     // ── VMD 动画（Step 5d-4：MmdTimeline 多层时间轴）───────────────────
     // 帧号驱动：渲染帧只推进游标，采样是帧号的纯函数 —— 跳帧 / seek / 暂停都不动采样逻辑。
     // smoke 模式跳过（自阴影 A/B 校验和比较的是相邻帧画面，动画会让模型动起来污染差异统计）；
@@ -196,11 +290,12 @@ window.Load += () =>
 
         // (文件名, 层说明)。默认加载「动作+IK.vmd」：骨动效 + 足ＩＫ/つま先ＩＫ 目标 + 表情
         // 全在这一份里（IK 骨的位置轨道就是足ＩＫ 目标，Mixer 直接把它写进 IK 骨的局部平移）。
+        // --motion=<vmd> 覆盖（外部親联调时换 花月成双-动作+表情.vmd 等整套舞曲）。
         // 原四层组合保留备用 —— 想切回"Motion + 三个表情槽位分文件"的形态，把数组换回去即可：
         //   ("Motion.vmd","骨动效"), ("Lips.vmd","口型"), ("Eyes.vmd","视线（両目）"), ("Facial.vmd","表情")
         var motionFiles = new (string File, string Desc)[]
         {
-            ("动作+IK.vmd", "骨动效 + IK + 表情"),
+            (extMotionOverride ?? "动作+IK.vmd", "骨动效 + IK + 表情"),
         };
 
         int loadedLayers = 0;
@@ -377,7 +472,7 @@ window.Load += () =>
             }
             else
             {
-                // ── 模型面板变换（MMD モデル操作）──────────────────────
+                // ── 模型变换（MMD モデル操作）──────────────────────
                 //   移動：I/K=Y∓  J/L=X∓  U/O=Z∓（步长 0.5；Shift=±0.1 微调）
                 //   回転：Alt+I/K=X（俯仰）∓  Alt+J/L=Y（偏航）∓  Alt+U/O=Z（滚转）∓，±15°，
                 //         MMD YXZ 欧拉序，状态为绝对弧度（每帧由 ApplyModelTransform 重建，天然幂等）
@@ -476,8 +571,32 @@ int xformFrame = 0;
 long xformC0 = 0, xformC1 = 0, xformC2 = 0;
 System.Numerics.Matrix4x4[]? xformWorldTr = null;   // TR 注入后的 WorldMatrices 快照（拡大率不得改变它）
 System.Numerics.Vector3 xformOc0 = default, xformCenter0 = default;   // 操作中心 / センター 基准世界位置
+
+// --ext-smoke 状态：计划帧游标 + 绑定状态轨迹（判定用）+ 绑定后最大偏差
+int extSmokeIdx = 0;
+double extSmokeMaxDist = 0;
+bool extSmokeAllBound = true, extSmokeNoneBefore = true;
 window.Render += dt =>
 {
+    if (extSmoke)
+    {
+        if (extSmokeIdx >= extSmokePlan.Length)
+        {
+            // 判定：绑定前未绑 / 绑定后已绑 / 偏差有界（~0 或「子模型自身动效叠加」的稳定小量 ——
+            // MMD 语义：子模型动效叠加在绑定之上，reze「伞在手里继续转」；扇子 VMD 自带
+            // 全ての親 位移轨道，故偏差不是 0 而是作者编排的持扇位）。
+            Console.WriteLine($"[ext-smoke] 结束：{extSmokePlan.Length} 个基准帧 | 绑定后最大偏差 {extSmokeMaxDist:F4}");
+            bool pass = extSmokeNoneBefore && extSmokeAllBound && extSmokeMaxDist < 5f;
+            Console.WriteLine($"[ext-smoke] 绑定前未绑={(extSmokeNoneBefore ? "✅" : "❌")} | " +
+                              $"绑定帧起已绑={(extSmokeAllBound ? "✅" : "❌")} | 偏差有界(<5)={(extSmokeMaxDist < 5f ? "✅" : "❌")}");
+            Console.WriteLine(pass
+                ? "[ext-smoke] 判定：外部親绑定生效 —— 绑定前扇子在地面，绑定帧瞬移到手附近，之后全程跟随亲骨"
+                : "[ext-smoke] 判定：存在异常，需检查");
+            window.Close();
+            return;
+        }
+        if (device == null || grid == null) { return; }
+    }
     if (smoke && ++smokeFrame > 40) { window.Close(); return; }
     if (xformSmoke && ++xformFrame > 12) { window.Close(); return; }
     if (ikSmoke && ++ikSmokeFrame > ikSmokeFrames)
@@ -542,6 +661,7 @@ window.Render += dt =>
             // --ik-smoke：按渲染帧号硬推进（不走 dt），保证导出帧可复现 —— 采样是帧号的纯函数，
             // 帧号必须由外部给定，否则同一"渲染帧 120"在不同机器/负载下落在不同动画帧上。
             if (ikSmoke) timeline.Seek(ikSmokeFrame - 1);
+            else if (extSmoke) timeline.Seek(extSmokePlan[Math.Min(extSmokeIdx, extSmokePlan.Length - 1)]);
             else timeline.Advance(dt);
             var sw = System.Diagnostics.Stopwatch.StartNew();
             // Step 5d-4：时间轴推进 + 混合求值（活跃层采样 → 加权混合 → 可见性 AND → 整体写回）。
@@ -552,6 +672,14 @@ window.Render += dt =>
             applyTicksMax = Math.Max(applyTicksMax, ticks);
             applyCount++;
             MmdMorphEvaluator.Evaluate(model.Model);
+
+            // 外部親·子模型采样：与主时间轴同游标（MMD 两支动效本就同处一条全局时间轴）。
+            // 子模型 FK 由其 PrepareFrame 做（在亲模型 FK 与绑定解析之后）。
+            if (extModel != null && extAnimation != null)
+            {
+                extAnimation.Sample(extModel.Model, timeline.CurrentFrame);
+                MmdMorphEvaluator.Evaluate(extModel.Model);
+            }
         }
         // 阶段 0：帧首统一上传（重算蒙皮矩阵 + UBO + 蒙皮 SSBO），
         // 影图 pass 与主渲染都读同一份、且是本帧的最新值（修复了上一帧滞后的坑）。
@@ -566,6 +694,37 @@ window.Render += dt =>
             model.GroundCollisionEnabled = groundCollisionEnabled;
         }
         model.PrepareFrame(in frame);
+
+        // 外部親·绑定解析（先亲后子）：亲模型世界矩阵已在本帧 PrepareFrame 内定稿，
+        // 这里解析绑定写 / 摘子模型 RootParent，随后子模型再做自己的 FK（消费根父矩阵）。
+        if (extModel != null && extController != null)
+        {
+            extController.Update(timeline?.CurrentFrame ?? 0);
+            extModel.PrepareFrame(in frame);
+
+            // --ext-smoke：逐计划帧量化「全ての親 vs 亲骨」的世界偏差。
+            if (extSmoke && timeline != null)
+            {
+                double sceneFrame = timeline.CurrentFrame;
+                var fan = extModel.Model;
+                int fanRoot = fan.FindBone("全ての親");
+                for (int i = 0; i < fan.BoneCount && fanRoot < 0; i++)
+                    if (fan.ParentIndices[i] < 0) fanRoot = i;
+                int handIdx = model.Model.FindBone(extParentBone);
+
+                var rootPos = fanRoot >= 0 ? fan.WorldMatrices[fanRoot].Translation : System.Numerics.Vector3.Zero;
+                var bonePos = handIdx >= 0 ? model.Model.WorldMatrices[handIdx].Translation : System.Numerics.Vector3.Zero;
+                bool bound = fan.RootParent is not null;
+                if (sceneFrame < extBindFrame && bound) extSmokeNoneBefore = false;
+                if (sceneFrame >= extBindFrame && !bound) extSmokeAllBound = false;
+                double dist = System.Numerics.Vector3.Distance(rootPos, bonePos);
+                if (bound && sceneFrame >= extBindFrame && dist > extSmokeMaxDist) extSmokeMaxDist = dist;
+                Console.WriteLine($"[ext-smoke] 帧 {sceneFrame,6:F0} | 绑定={(bound ? "是" : "否")} | " +
+                                  $"全ての親 @({rootPos.X:F2},{rootPos.Y:F2},{rootPos.Z:F2}) | " +
+                                  $"{extParentBone} @({bonePos.X:F2},{bonePos.Y:F2},{bonePos.Z:F2}) | 偏差 {dist:F3}");
+                extSmokeIdx++;
+            }
+        }
 
         // --ik-smoke：IK 验收。量化「目标（足ＩＫ）与实际被驱动端（足首）的距离」——
         // 腿脚悬空会直接体现为这个距离下不去；Δy 为负说明踝低于目标（过冲/腿被压）。
@@ -630,6 +789,7 @@ window.Render += dt =>
             shadow.RenderShadowMaps(device, model, w, h);
 
         model.Draw(in frame);
+        extModel?.Draw(in frame);   // 外部親子模型（影图只由主模型 caster 生成，子模型共享同一张 Z 图采样）
     }
 
     grid.Draw(viewProj);
@@ -843,6 +1003,7 @@ window.Render += dt =>
 
 window.Closing += () =>
 {
+    extModel?.Dispose();
     model?.Dispose();
     shadow?.Dispose();
     debugView?.Dispose();
@@ -932,6 +1093,31 @@ static string? FindMotionFile(string fileName)
 
     string fromCwd = Path.Combine(Directory.GetCurrentDirectory(), Relative.Replace('/', Path.DirectorySeparatorChar));
     return File.Exists(fromCwd) ? fromCwd : null;
+}
+
+/// <summary>取 <c>--key=value</c> 形参的 value。</summary>
+static string? FindArgValue(string[] args, string key)
+{
+    string? arg = Array.Find(args, a => a.StartsWith(key + "=", StringComparison.Ordinal));
+    return arg is null ? null : arg[(key.Length + 1)..];
+}
+
+/// <summary>
+/// 解析用户给的路径：绝对路径 / cwd 相对 / 仓库根相对（从输出目录往上找）。
+/// 找不到返回 null。
+/// </summary>
+static string? ResolvePath(string path)
+{
+    if (File.Exists(path)) return Path.GetFullPath(path);
+
+    var dir = new DirectoryInfo(AppContext.BaseDirectory);
+    while (dir is not null)
+    {
+        string candidate = Path.Combine(dir.FullName, path.Replace('/', Path.DirectorySeparatorChar));
+        if (File.Exists(candidate)) return candidate;
+        dir = dir.Parent;
+    }
+    return null;
 }
 
 // ── --ik-smoke 用：逐链打印「目标 vs 被驱动端」的距离与高度差 ────────────────

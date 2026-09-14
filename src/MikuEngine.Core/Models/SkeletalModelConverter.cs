@@ -28,7 +28,7 @@ public static class SkeletalModelConverter
         BuildSegments(pmx, model);
         BuildMorphs(pmx, model);
 
-        model.ResolveModelTransformBones();   // 全ての親 / 操作中心（模型面板变换的载体与锚点）
+        model.ResolveModelTransformBones();   // 全ての親 / 操作中心（模型变换的载体与锚点）
         model.ResetPose();
         return model;
     }

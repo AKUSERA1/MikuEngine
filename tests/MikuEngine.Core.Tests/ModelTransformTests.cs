@@ -5,7 +5,7 @@ using MikuEngine.Core.Models;
 namespace MikuEngine.Core.Tests;
 
 /// <summary>
-/// 模型面板变换（MMD モデル操作）单测：
+/// 模型变换（MMD モデル操作）单测：
 ///   * 移動/回転 注入 全ての親（载体），子孙跟随 —— 物理/IK 消费的 WorldMatrices 自动包含；
 ///   * 操作中心 是并列根骨，不在变形链上 ⇒ 「始终留在原地」；
 ///   * 状态为绝对值，逐帧从 D 重建 ⇒ 幂等，ResetPose 不冲掉面板状态。

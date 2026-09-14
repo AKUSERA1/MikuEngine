@@ -623,7 +623,7 @@ public sealed unsafe class GlesModelRenderer : IDisposable
         // 都读这一份，保证同帧内三个 pass 的可见性判定一致。
         ModelVisible = _model.Visible;
 
-        // 模型面板变换（MMD モデル操作）：
+        // 模型变换（MMD モデル操作）：
         //   ① 移動/回転 → 全ての親 世界矩阵后乘因子（ApplyModelTransform 只重建因子，
         //      注入发生在 RecomputeBone）—— 必须先于 IK/FK/物理，随后它们全部自动跟随；
         //   ② 拡大率 → 渲染层根矩阵（蒙皮后整体施加，与物理解耦）+ 法线修正矩阵。

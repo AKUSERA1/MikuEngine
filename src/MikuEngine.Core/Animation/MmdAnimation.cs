@@ -299,6 +299,13 @@ public sealed class MmdAnimation
     /// </summary>
     public MmdCameraTrack? CameraTrack;
 
+    /// <summary>
+    /// 外部親绑定轨道（整场景量，无模型绑定）。空轨道 ⇒ 本动效无外部親键。
+    /// 与相机同理：键<b>参与</b>播放区间计算；亲模型按名字由
+    /// <see cref="MmdExternalParentController"/> 解析。
+    /// </summary>
+    public MmdExternalParentTrack ExternalParentTrack = new();
+
     /// <summary>首键帧号（所有轨道取并），无轨道时为 0。</summary>
     public double StartFrame;
 
@@ -362,6 +369,8 @@ public sealed class MmdAnimation
             ? MmdCameraTrack.FromVmd(vmd.CameraKeys)
             : new MmdCameraTrack();
 
+        animation.ExternalParentTrack = MmdExternalParentTrack.FromVmd(vmd.ExternalParentKeys);
+
         // 播放区间只由骨 / morph / 相机轨道决定：property 是叠加在姿态上的布尔量，
         // 不是姿态来源，因此它的键不应延长 / 缩短可播放的动效范围。
         // 相机键纳入：相机驱动的是同一个时间轴游标，纯相机 VMD（无骨/表情键）也要可播。
@@ -375,6 +384,12 @@ public sealed class MmdAnimation
             var ct = animation.CameraTrack;
             min = System.Math.Min(min, ct.Frames[0]);
             max = System.Math.Max(max, ct.Frames[^1]);
+        }
+        // 外部親键同相机：绑定驱动的是同一个时间轴游标，也要参与区间计算。
+        if (!animation.ExternalParentTrack.IsEmpty)
+        {
+            min = System.Math.Min(min, animation.ExternalParentTrack.Keys[0].Frame);
+            max = System.Math.Max(max, animation.ExternalParentTrack.EndFrame);
         }
         if (max >= min)
         {
@@ -416,6 +431,8 @@ public sealed class MmdAnimation
             PropertyTrack = PropertyTrack,
             // 相机同为整场景量，原样透传（轨道实例共享）
             CameraTrack = CameraTrack,
+            // 外部親轨道同相机：亲模型按名字解析，不做「该模型是否存在对应骨」的过滤
+            ExternalParentTrack = ExternalParentTrack,
         };
     }
 
