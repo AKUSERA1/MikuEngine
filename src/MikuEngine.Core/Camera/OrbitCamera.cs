@@ -86,17 +86,22 @@ public sealed class OrbitCamera
     }
 
     /// <summary>
-    /// VMD 姿态的视点：eye = target + q·(0,0,1)·distance。
+    /// VMD 姿态的视点：eye = target + R·(0,0,1)·distance。
     ///
     /// euler 三轴<b>取负</b>后构建四元数（babylon-mmd 用 RotationYawPitchRoll(-ry,-rx,-rz)；
     /// System.Numerics 的 CreateFromYawPitchRoll 与其 yaw/pitch/roll 语义一致）。
-    /// forward = q·(0,0,1)（旋转矩阵第 3 列），distance 为负 ⇒ eye 落在注视点后方。
+    /// forward = R·(0,0,1)，distance 为负 ⇒ eye 落在注视点后方。
     /// </summary>
+    /// <remarks>
+    /// System.Numerics 是<b>行向量</b>约定：<c>CreateFromQuaternion</c> 的第 i <b>行</b>才是基向量 i 的像
+    /// （v_world = v_local · M），所以 forward 必须取<b>第 3 行</b> (M31,M32,M33)。
+    /// 读成第 3 列拿到的是 Rᵀ·(0,0,1) —— x/y 反号。
+    /// </remarks>
     private Vector3 VmdEye()
     {
         var q = Quaternion.CreateFromYawPitchRoll(-_vmdRotation.Y, -_vmdRotation.X, -_vmdRotation.Z);
         var m = Matrix4x4.CreateFromQuaternion(q);
-        var forward = new Vector3(m.M13, m.M23, m.M33);
+        Vector3 forward = new(m.M31, m.M32, m.M33);
         return _vmdTarget + forward * _vmdDistance;
     }
 
@@ -207,21 +212,29 @@ public sealed class OrbitCamera
     /// （eye == target），lookAt 的归一化会退化成全零基，而 Rᵀ·T 形式对 d=0 天然稳健。
     /// 列主序输出，与 <see cref="WriteLookAt"/> 同一约定（col0=right、col1=up、col2=forward）。
     /// </summary>
+    /// <remarks>
+    /// 行向量约定（见 <see cref="VmdEye"/>）：M 的第 1/2/3 <b>行</b>才是相机的 right/up/forward，
+    /// 视图旋转部分 = Mᵀ（输出的第 c 列 = M 的第 c 行），平移 = −M·eye。此前把 M 的<b>列</b>当基向量，
+    /// 整个视图被 Rᵀ 镜像 ⇒ 与 MMD 的取景对不上。
+    /// </remarks>
     private void WriteVmdViewMatrix(Span<float> o)
     {
         var q = Quaternion.CreateFromYawPitchRoll(-_vmdRotation.Y, -_vmdRotation.X, -_vmdRotation.Z);
         var r = Matrix4x4.CreateFromQuaternion(q);
-        Vector3 forward = new(r.M13, r.M23, r.M33);
+
+        // 行向量约定：第 1/2/3 行 = 相机的 right / up / forward（世界空间）
+        Vector3 right = new(r.M11, r.M12, r.M13);
+        Vector3 up = new(r.M21, r.M22, r.M23);
+        Vector3 forward = new(r.M31, r.M32, r.M33);
         Vector3 eye = _vmdTarget + forward * _vmdDistance;
 
-        // R 的三列 = right(M11,M21,M31) / up(M12,M22,M32) / forward(M13,M23,M33)；
-        // view 的 col0 = R 的第 0 行 = (right.X, up.X, forward.X)，其余同构。
-        o[0] = r.M11; o[1] = r.M12; o[2] = r.M13; o[3] = 0f;
-        o[4] = r.M21; o[5] = r.M22; o[6] = r.M23; o[7] = 0f;
-        o[8] = r.M31; o[9] = r.M32; o[10] = r.M33; o[11] = 0f;
-        o[12] = -(r.M11 * eye.X + r.M21 * eye.Y + r.M31 * eye.Z);
-        o[13] = -(r.M12 * eye.X + r.M22 * eye.Y + r.M32 * eye.Z);
-        o[14] = -(r.M13 * eye.X + r.M23 * eye.Y + r.M33 * eye.Z);
+        // 存储布局与 WriteLookAt 一致：输出的第 c 列 = (right.c, up.c, forward.c)
+        o[0] = right.X;  o[1] = up.X;  o[2] = forward.X;  o[3] = 0f;
+        o[4] = right.Y;  o[5] = up.Y;  o[6] = forward.Y;  o[7] = 0f;
+        o[8] = right.Z;  o[9] = up.Z;  o[10] = forward.Z; o[11] = 0f;
+        o[12] = -Vector3.Dot(right, eye);
+        o[13] = -Vector3.Dot(up, eye);
+        o[14] = -Vector3.Dot(forward, eye);
         o[15] = 1f;
     }
 

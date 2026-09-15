@@ -78,6 +78,15 @@ public sealed class MmdCameraTrack
         }
 
         int b = a + 1;
+
+        // 1 帧间隔的两键之间不做插值。这不是优化而是**语义**：MMD 只在整数帧上出画，相机切换（cut）的标准编码就是
+        // 「两键相距 1 帧、值差异巨大」若照常插值，这一帧内会变成一次跨整个画幅的高速滑动。
+        if (Frames[b] - Frames[a] <= 1)
+        {
+            pose = new MmdCameraPose(Targets[a], Rotations[a], Distances[a], Fovs[a]);
+            return true;
+        }
+
         double span = Frames[b] - Frames[a];
         if (span <= 0)
         {
