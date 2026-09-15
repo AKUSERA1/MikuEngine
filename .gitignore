@@ -369,10 +369,9 @@ FodyWeavers.xsd
 
 # Doc&SampelModel
 /docs/
-/samples/MikuEngine.Demo/Model/
-/samples/MikuEngine.Demo/Motion/
 /tests/MikuEngine.Core.Tests/TestModels
 
 # DevReference
 /reference/
 /tools/
+samples/MikuEngine.Demo.old/
