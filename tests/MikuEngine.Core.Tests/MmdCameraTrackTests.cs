@@ -220,13 +220,10 @@ public class MmdCameraTrackTests
     [Fact]
     public void RealCameraVmd_Parses_Builds_Samples()
     {
-        string? path = FindUp(dir =>
-            File.Exists(Path.Combine(dir, "samples", "MikuEngine.Demo", "Motion", "镜头.vmd"))
-                ? Path.Combine(dir, "samples", "MikuEngine.Demo", "Motion", "镜头.vmd")
-                : null);
+        string? path = TestAssets.Find("Motion/镜头.vmd");
         if (path is null)
         {
-            Assert.Fail("未找到 samples/MikuEngine.Demo/Motion/镜头.vmd");
+            Assert.Fail("未找到 samples/*/Motion/镜头.vmd");
             return;
         }
 
@@ -248,15 +245,5 @@ public class MmdCameraTrackTests
             Assert.True(float.IsFinite(p.RotationEuler.X) && float.IsFinite(p.RotationEuler.Y) && float.IsFinite(p.RotationEuler.Z));
             Assert.True(float.IsFinite(p.Distance));
         }
-    }
-
-    private static string? FindUp(Func<string, string?> probe)
-    {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
-        {
-            var hit = probe(dir.FullName);
-            if (hit != null) return hit;
-        }
-        return null;
     }
 }

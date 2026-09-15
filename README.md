@@ -52,7 +52,7 @@ C# / .NET 10 的 MikuMikuDance（MMD）实时引擎，目标平台 **OpenGL ES 3
 
 - ✅ 交错 VBO / 索引缓冲 / 蒙皮矩阵 SSBO / morph SSBO（顶点 + UV）
 - ✅ Phong + Toon + Sphere（加算/乘算）光照，严格复刻 PmxEditor 预览效果
-- ✅ Opaque / Cutout / Blended 三队列排序绘制
+- ✅ 绘制：单一队列、按 PMX 材质顺序（blend 恒开、深度写恒开、无 alpha test、默认剔除背面）
 - ✅ 轮廓线（edge pass，per-顶点 EdgeScale / per-材质 EdgeSize）
 - ✅ 自阴影：光照 Z 图 + 内联 PCF（三种风格：PE 标准 16-tap / 硬边缘阴影 / 软影）
 - ✅ 床影（地面阴影）
@@ -62,12 +62,13 @@ C# / .NET 10 的 MikuMikuDance（MMD）实时引擎，目标平台 **OpenGL ES 3
 ### 多模型支持
 
 - ✅ 核心层：`SkeletalModel` / `MmdAnimation.Bind` / Timeline 全部按实例自包含，零全局状态
-- ⏳ Demo 多模型改造
+- ✅ Demo 多模型：下拉框切活跃模型，每个模型各自的时间轴，共享相机 / 格网 / 阴影 / 主时钟游标
 
 ### 平台与工具
 
-- ✅ 桌面 GLFW 窗口 + 输入（OrbitInputController：鼠标 / 触控手势）
-- ✅ xUnit 回归（Core 168 通过 / Physics 70 通过）+ 四类无人值守 smoke 验收（见下）
+- ✅ 桌面 WinForms GUI（MMD 本体倒品字形布局）+ WGL 自建 GL 上下文视口
+- ✅ 窗体用设计器风格布局（`MainForm.Designer.cs` + `InitializeComponent`），可在 VS 里直接打开设计器
+- ✅ xUnit 回归（Core 175 通过 / Physics 70 通过）
 - ✅ tools/ 取证脚本（PMX 骨表/刚体表、VMD 轨道扫描、PmxEditor 常量 dump、mmdbridge bake 对拍）
 - ⏳ Android 移植验证（GLES 3.1 目标已预留）
 
@@ -77,38 +78,74 @@ C# / .NET 10 的 MikuMikuDance（MMD）实时引擎，目标平台 **OpenGL ES 3
 # 构建（.NET 10 SDK）
 dotnet build MikuEngine.slnx
 
-# 运行 Demo（自动寻找 samples/MikuEngine.Demo/Model/1/1.pmx，也可显式传 PMX 路径）
+# 运行 Demo（不自动载入任何文件，模型 / 动画由拖放或菜单打开）
 dotnet run --project samples/MikuEngine.Demo
 ```
 
-## Demo 操作
+## Demo 界面与操作
+
+界面按 MMD 本体的「倒品字形」排布：
+
+```
+┌────────────────────────────────────────────────────┐
+│ 菜单栏（文件 / 显示 / 物理 / 动作 / 帮助）             │
+├────────────────────┬───────────────────────────────┤
+│ 时间线（当前帧号、   │ 3D 视口                        │
+│  活跃模型轨道数）    │                    ┌────────┐ │
+│ 消息（运行日志）     │                    │TRS 变换盘│ │
+├────────────────────┴───────────────────────────────┤
+│ 操作面板：模型（载入/活跃模型下拉/移除/IK）· 动画 · 模型变换 │
+├────────────────────────────────────────────────────┤
+│ 状态栏（fps / 模型数 / OpenGL 版本）                  │
+└────────────────────────────────────────────────────┘
+```
 
 | 输入 | 功能 |
 |---|---|
-| 鼠标 左键 / 右键 / 滚轮 | 轨道相机：旋转 / 平移 / 缩放 |
-| `I`/`K` · `J`/`L` · `U`/`O` | 模型面板 移動（Y/X/Z 世界轴，0.5/步；`Shift` 微调 0.1） |
-| `Alt` + 同上键 | 模型面板 回転（X=俯仰 / Y=偏航 / Z=滚转，∓15°/步，MMD YXZ 序） |
-| `.` / `,` | 拡大率 全体放大 / 缩小（×1.1，与物理解耦） |
-| `Shift+.` / `Shift+,` | 只拉伸 / 只压扁 Z 轴（压纸片测试） |
-| `R` | 重置全部模型变换 |
-| 空格 / `←→` / `↑↓` / `F` | 动画：暂停 / ∓1 帧 / 帧率 ±6 / 回首帧 |
-| `E` | 轮廓线开关 |
-| `1` / `2` / `0` | 自阴影：开 / 自阴影+床影 / 关 |
-| `S` | 自阴影风格循环（PE 标准 → 硬边 → 软影） |
+| 拖放 `.pmx` 到窗口 | 新增一个模型（活跃模型切到新模型） |
+| 拖放 `.vmd` 到窗口 | 把动画载入到**当前活跃模型**（替换该模型的动画，别的模型不受影响） |
+| 「载入模型…」/「载入动画…」 | 同上，走文件对话框 |
+| 活跃模型下拉框 | 切换**当前操作对象**：TRS 作用对象 + 动画载入目标。**阴影由全部模型共同投射，与它无关** |
+| 「模型」区块 IK 复选框 | 开关**活跃模型**的 IK 求解（逐模型保存）；关掉后停在「付与之后、IK 之前」 |
+| 视口 左键 / 右键 / 滚轮 | 轨道相机：旋转 / 平移 / 缩放（左键拖 = **模型跟手**：拖右向右转、拖下露顶部） |
+| 视口右下角变换盘 | 下排选 `移动`/`旋转`/`缩放`，上排按住 `X`/`Y`/`Z` **上下拖动**（向上=正向）——**全局模式** |
+| 空格 / `←→` / `F` | 播放暂停 / 步进 1 帧 / 回首帧（**启动为暂停**；没载入动画时帧号不推进） |
+| `R` | 重置活跃模型的全部变换（移動 / 回転 / 拡大率） |
+| `E` / `S` | 轮廓线开关 / 自阴影风格循环 |
+| `0` / `1` / `2` | 自阴影：关 / 自阴影 / 自阴影+床影 |
 | `P` / `G` / `H` | 物理模拟 / 地面碰撞 / 物理后付与 开关 |
+| `C` | 相机动画开关（开启后 VMD 独占视图、鼠标轨道失效） |
 
-## 测试与无人值守验收
+模型变换是 MMD「モデル操作」的全局模式：平移与旋转注入 `全ての親`（`操作中心` 留在原地、
+子孙绕枢轴跟随），缩放只进渲染层根矩阵（与物理 / IK 解耦，`WorldMatrices` 逐位不变）。
+
+### Demo 的结构与边界
+
+`samples/MikuEngine.Demo` 是**纯界面/交互层**，只做「WinForms 组装 + 调用引擎」：
+
+| 目录 | 内容 |
+|---|---|
+| `Program.cs` | 入口：`Application.Run(new MainForm())`，无命令行解析 |
+| `MainForm.cs` / `.Designer.cs` | 主窗体：布局（设计器风格）、菜单、拖放、渲染循环、读数刷新 |
+| `Rendering/` | `GlViewport`（WGL 视口控件）、`DemoScene`（模型集合 + 相机 + 主时钟 + 每帧管线）、`DemoModel`、`ModelTransform` |
+| `Controls/` | `TransformPad`（TRS 变换盘）、`TimelineView`（简化时间线） |
+
+它**不自动载入任何文件、不内置测试开关、也不附带 MMD 资源**：
+启动后是空场景（只有格网），模型与动画一律由用户拖放或菜单打开；
+渲染与动画逻辑全部在 `src/`，`samples/` 下不复制任何引擎代码。
+
+## 测试
 
 ```bash
-dotnet test MikuEngine.slnx                       # 全量单测
-
-dotnet run --project samples/MikuEngine.Demo -- --smoke        # 渲染自检（Z 图统计 + 影贡献象素量化）
-dotnet run --project samples/MikuEngine.Demo -- --anim-smoke   # 多层动画播放验收
-dotnet run --project samples/MikuEngine.Demo -- --ik-smoke     # IK 收敛验收（目标-末端距离 < 1 单位）
-dotnet run --project samples/MikuEngine.Demo -- --xform-smoke  # 模型变换端到端验收（TR 注入 / 操作中心不动 / 缩放解耦 / 重置幂等）
+dotnet test MikuEngine.slnx          # Core + Physics 全量单测
 ```
 
-`--ik-smoke` 支持 `--ik-dump=<path>` 导出 IK 对拍 JSON、`--ik-bake-dump=<path>` 导出与 mmdbridge 烘焙逐帧对拍的数据。
+单测里对真实 MMD 资源（PMX / VMD）的引用统一走 `tests/MikuEngine.Core.Tests/TestAssets.cs`：
+它**不写死 Demo 目录名**，而是在仓库根的 `samples/*/` 下按相对路径查找 ——
+Demo 项目目录改名或搬迁都不会打断测试。
+
+> 注：`samples/MikuEngine.Demo.old/` 是改造前的控制台→GUI 版 Demo（含 `--smoke` / `--xform-smoke` /
+> `--gui-shot` 等无人值守自检开关与 MMD 资源），目前**原样保留**，后续计划改造成自动化验证专用工程。
 
 ## 鸣谢
 

@@ -12,11 +12,9 @@ namespace MikuEngine.Core.Tests;
 /// </summary>
 public class SkeletalModelConverterTests
 {
-    private const string Relative = "samples/MikuEngine.Demo/Model/1/1.pmx";
+    private static string FindModel() => TestAssets.Model();
 
-    private static string FindModel() => FindUp(Relative);
-
-    private static string FindMotion() => FindUp("samples/MikuEngine.Demo/Motion/Motion.vmd");
+    private static string FindMotion() => TestAssets.Motion("Motion.vmd");
 
     private static string FindUp(string relative)
     {
@@ -613,14 +611,7 @@ public class EdgeSegmentTests
 {
     private static SkeletalModel Load()
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null)
-        {
-            var c = Path.Combine(dir.FullName, "samples/MikuEngine.Demo/Model/1/1.pmx".Replace('/', Path.DirectorySeparatorChar));
-            if (File.Exists(c)) return SkeletalModelConverter.Convert(PmxParser.Parse(File.ReadAllBytes(c)));
-            dir = dir.Parent;
-        }
-        throw new IOException("未找到 Model/1/1.pmx");
+        return SkeletalModelConverter.Convert(PmxParser.Parse(File.ReadAllBytes(TestAssets.Model())));
     }
 
     [Fact(Skip = "硬编码旧 demo 模型(Elysia)的轮廓段期望(42 材质中 23 个带轮廓线)；当前 demo 已换为 Model/1/1.pmx，材质数不同。")]

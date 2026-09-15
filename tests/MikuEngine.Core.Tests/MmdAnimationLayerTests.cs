@@ -16,21 +16,7 @@ public class MmdAnimationLayerTests
 {
     // ---------------------------------------------------------------- 定位（同 VmdParserTests）
 
-    private static string? FindUp(Func<string, string?> probe)
-    {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
-        {
-            var hit = probe(dir.FullName);
-            if (hit != null) return hit;
-        }
-        return null;
-    }
-
-    private static readonly string VmdPath = FindUp(dir =>
-        File.Exists(Path.Combine(dir, "samples", "MikuEngine.Demo", "Motion", "Motion.vmd"))
-            ? Path.Combine(dir, "samples", "MikuEngine.Demo", "Motion", "Motion.vmd")
-            : null)
-        ?? throw new IOException("未找到 samples/MikuEngine.Demo/Motion/Motion.vmd");
+    private static readonly string VmdPath = TestAssets.Motion("Motion.vmd");
 
     // ---------------------------------------------------------------- 合成构件
 

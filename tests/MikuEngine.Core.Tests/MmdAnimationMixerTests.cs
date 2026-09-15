@@ -76,21 +76,7 @@ public class MmdAnimationMixerTests
         return model;
     }
 
-    private static string? FindUp(Func<string, string?> probe)
-    {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
-        {
-            var hit = probe(dir.FullName);
-            if (hit != null) return hit;
-        }
-        return null;
-    }
-
-    private static readonly string VmdPath = FindUp(dir =>
-        File.Exists(Path.Combine(dir, "samples", "MikuEngine.Demo", "Motion", "Motion.vmd"))
-            ? Path.Combine(dir, "samples", "MikuEngine.Demo", "Motion", "Motion.vmd")
-            : null)
-        ?? throw new IOException("未找到 samples/MikuEngine.Demo/Motion/Motion.vmd");
+    private static readonly string VmdPath = TestAssets.Motion("Motion.vmd");
 
     private static void AssertQuaternionClose(Quaternion expected, Quaternion actual, float epsilon = 1e-5f)
     {
@@ -536,11 +522,7 @@ public class MmdAnimationMixerTests
         // Demo 的四层组合（Motion + Lips + Eyes + Facial）打在真实 Model/1/1.pmx 上：
         // 锁死「解析 → 绑定 → 混合 → 写回」在真实资源上确实驱动骨与 morph。
         // （此用例与 --anim-smoke 互为印证；资源被替换时按结构性条件跳过。）
-        var modelPath = FindUp(dir =>
-            File.Exists(Path.Combine(dir, "samples", "MikuEngine.Demo", "Model", "1", "1.pmx"))
-                ? Path.Combine(dir, "samples", "MikuEngine.Demo", "Model", "1", "1.pmx")
-                : null)
-            ?? throw new IOException("未找到 samples/MikuEngine.Demo/Model/1/1.pmx");
+        var modelPath = TestAssets.Model();
         var model = SkeletalModelConverter.Convert(PmxParser.Parse(File.ReadAllBytes(modelPath)));
 
         int centerIndex = model.FindBone("センター");
@@ -550,11 +532,7 @@ public class MmdAnimationMixerTests
         var mixer = new MmdAnimationMixer();
         foreach (string file in new[] { "Motion.vmd", "Lips.vmd", "Eyes.vmd", "Facial.vmd" })
         {
-            string path = FindUp(dir =>
-                File.Exists(Path.Combine(dir, "samples", "MikuEngine.Demo", "Motion", file))
-                    ? Path.Combine(dir, "samples", "MikuEngine.Demo", "Motion", file)
-                    : null)
-                ?? throw new IOException($"未找到 samples/MikuEngine.Demo/Motion/{file}");
+            string path = TestAssets.Motion(file);
             var vmd = VmdParser.Parse(File.ReadAllBytes(path));
             var expanded = MmdAnimation.FromVmd(vmd);
             mixer.AddLayer(new MmdAnimationLayer(expanded.Bind(model)));

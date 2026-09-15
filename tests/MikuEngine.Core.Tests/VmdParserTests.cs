@@ -46,11 +46,7 @@ public class VmdParserTests
                 : null)
         ?? throw new IOException("未找到 Motion.vmd.golden.json（TestData 目录）");
 
-    private static readonly string VmdPath = FindUp(dir =>
-        File.Exists(Path.Combine(dir, "samples", "MikuEngine.Demo", "Motion", "Motion.vmd"))
-            ? Path.Combine(dir, "samples", "MikuEngine.Demo", "Motion", "Motion.vmd")
-            : null)
-        ?? throw new IOException("未找到 samples/MikuEngine.Demo/Motion/Motion.vmd");
+    private static readonly string VmdPath = TestAssets.Motion("Motion.vmd");
 
     private static VmdMotion ParseRealVmd() => VmdParser.Parse(File.ReadAllBytes(VmdPath));
 

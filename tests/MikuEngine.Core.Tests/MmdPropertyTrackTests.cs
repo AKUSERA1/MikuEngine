@@ -17,21 +17,7 @@ namespace MikuEngine.Core.Tests;
 /// </summary>
 public class MmdPropertyTrackTests
 {
-    private static string? FindUp(Func<string, string?> probe)
-    {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
-        {
-            var hit = probe(dir.FullName);
-            if (hit != null) return hit;
-        }
-        return null;
-    }
-
-    private static readonly string TestVmdPath = FindUp(dir =>
-        File.Exists(Path.Combine(dir, "samples", "MikuEngine.Demo", "Motion", "test.vmd"))
-            ? Path.Combine(dir, "samples", "MikuEngine.Demo", "Motion", "test.vmd")
-            : null)
-        ?? throw new IOException("未找到 samples/MikuEngine.Demo/Motion/test.vmd");
+    private static readonly string TestVmdPath = TestAssets.Motion("test.vmd");
 
     // ---------------------------------------------------------------- 合成构件
 
