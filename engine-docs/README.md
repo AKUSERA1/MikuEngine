@@ -2,8 +2,8 @@
 
 > 跨平台原生 MMD（MikuMikuDance）引擎。主目标平台 Android（OpenGL ES 3.1），桌面使用 GLFW 作为测试宿主。
 
-本文档面向**调用方**（游戏/应用开发者），描述如何安装、集成、使用 MikuEngine。  
-开发日志 / 架构决策记录请参阅项目根目录下的 [docs/](../docs)。
+本文档面向**调用方**（游戏 / 应用开发者），只描述如何安装、集成、使用 MikuEngine，
+以及使用时必须遵守的约定与需要注意的边界。
 
 ---
 
@@ -12,24 +12,25 @@
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │  平台层                                                               │
-│  Demo (GLFW) · Android Activity · iOS UIView                         │
-│  职责：窗口/上下文 + 原生输入 API → Engine 层一行转发                  │
+│  桌面宿主 (GLFW) · Android Activity · iOS UIView                     │
+│  职责：窗口 / 上下文 + 原生输入 API → Engine 层一行转发                │
 ├──────────────────────────────────────────────────────────────────────┤
-│  Engine 层  MikuEngine.Engine                                         │
-│  OrbitInputController（跨平台手势识别 + 灵敏度）                        │
+│  Engine 层  MikuEngine.Engine                                        │
+│  OrbitInputController（跨平台手势识别 + 灵敏度）                       │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Core 层  MikuEngine.Core                                            │
-│  OrbitCamera · MmdMath · ModelRootTransform · PmxParser ·              │
-│  SkeletalModel（姿势/面板变换/表情）· Animation（VMD/混合/IK/付与）      │
-│  职责：纯数学 / 纯数据，零平台依赖                                        │
+│  OrbitCamera · MmdMath · ModelRootTransform · PmxParser ·             │
+│  SkeletalModel（姿势 / 模型变换 / 表情）                               │
+│  Animation（VMD / 混合 / IK / 赋予 / 相机 / 外部親）                    │
+│  职责：纯数学 / 纯数据，零平台依赖                                      │
 ├──────────────────────────────────────────────────────────────────────┤
-│  Physics 层  MikuEngine.Physics                                       │
-│  MMDPhysics（骨骼同步层） · World · RigidBodyStore ·                   │
-│  ContactDetection · ConstraintSolver（reze 物理逐式移植）               │
+│  Physics 层  MikuEngine.Physics                                      │
+│  MMDPhysics（骨骼同步层）· World · RigidBodyStore ·                   │
+│  ContactDetection · ConstraintSolver（MMD 刚体 / 关节模拟）            │
 ├──────────────────────────────────────────────────────────────────────┤
-│  Render 层  MikuEngine.Render.GLES                                    │
+│  Render 层  MikuEngine.Render.GLES                                   │
 │  GlesDevice · GlesGridRenderer · GlesModelRenderer ·                  │
-│  GlesShadowRenderer · GlesTextureLibrary · GlesSkinMatricesBuffer ·    │
+│  GlesShadowRenderer · GlesTextureLibrary · GlesSkinMatricesBuffer ·   │
 │  GlesMorphBuffer                                                      │
 │  职责：OpenGL ES 3.1 渲染（GLES 后端唯一，桌面自动加载 GL）             │
 └──────────────────────────────────────────────────────────────────────┘
@@ -41,33 +42,35 @@
 
 ## 快速导航
 
-### ① 入门
+### 1. 入门
 
 | 文档 | 说明 |
 |---|---|
-| [安装与依赖](getting-started/installation.md) | NuGet 包引用、目标框架、平台依赖 |
-| [跑通第一个 Demo](getting-started/first-window.md) | 最小可运行窗口 + 相机 + 网格地面 |
+| [安装与依赖](getting-started/installation.md) | 包引用、目标框架、平台依赖 |
+| [最小可运行窗口](getting-started/first-window.md) | 创建窗口 + 相机 + 网格地面 |
 
-### ② Core 模块
+### 2. Core 模块
 
 | 文档 | 说明 |
 |---|---|
-| [坐标系约定](core/coordinate-system.md) | 左手 / Y-up / +Z-forward / 列主序矩阵 / 两套矩阵表示，**必读** |
+| [坐标系约定](core/coordinate-system.md) | 左手 / Y-up / +Z-forward / 两套矩阵表示，**必读** |
 | [OrbitCamera API](core/orbit-camera.md) | 轨道相机的构造、属性、矩阵输出方法 |
 | [PMX 模型解析](core/pmx-parser.md) | PmxParser · PmxModel · SkeletalModel · SkeletalModelConverter |
 | [MMD 数学工具](core/mmd-math.md) | MmdMath（YXZ 欧拉角 ↔ 四元数）· QuatMath · Mat4 · ModelRootTransform |
-| [模型变换与缩放](core/model-transform.md) | MMD モデル操作：全ての親 注入 · 渲染层根矩阵 · 缩放与物理解耦 |
-| [动画子系统](core/animation/index.md) | VMD 加载 · 播放 · 多轨混合 · 表示枠可见性 · CCD IK · 付与 · 生命周期 |
+| [模型变换与缩放](core/model-transform.md) | 移动 / 旋转 注入 全ての親 · 渲染层根矩阵 · 缩放倍率与物理解耦 |
+| [动画子系统](core/animation/index.md) | VMD 加载 · 播放 · 多轨混合 · 显示帧可见性 · CCD IK · 赋予 · 生命周期 |
+| [VMD 相机动画](core/animation/camera.md) | 相机轨道采样 · OrbitCamera 驱动模式 · 输入短路 · 视差视点 |
+| [外部親绑定](core/animation/external-parent.md) | 跨模型挂载：绑定轨道 · 控制器 · 先亲后子帧序 |
 | [CCD IK 求解器](core/animation/ik.md) | MmdIkSolver · MmdIkChain · 角度限制 / ReverseClamp |
-| [付与变换](core/animation/append-transform.md) | 付与（Append Transform）· 局部付与 · 物理后付与 |
+| [赋予变换](core/animation/append-transform.md) | 赋予（Append Transform）· 局部赋予 · 物理后赋予 |
 
-### ③ Engine 模块
+### 3. Engine 模块
 
 | 文档 | 说明 |
 |---|---|
 | [OrbitInputController API](engine/orbit-input-controller.md) | 跨平台手势识别：鼠标 / 触控 / 捏合，灵敏度调整 |
 
-### ④ Render.GLES 模块
+### 4. Render.GLES 模块
 
 | 文档 | 说明 |
 |---|---|
@@ -77,66 +80,36 @@
 | [GlesShadowRenderer](render-gles/gles-shadow-renderer.md) | 自阴影 Z 图 + 床影：紧视锥 / texel snapping / 多风格软影 |
 | [渲染辅助组件](render-gles/gles-support.md) | GlesTextureLibrary · PmxFileResolver · GlesSkinMatricesBuffer · GlesMorphBuffer · GlesDebugOverlay |
 
-### ⑤ Physics 模块
+### 5. Physics 模块
 
 | 文档 | 说明 |
 |---|---|
 | [物理引擎总览](physics/index.md) | 模块结构 · 快速上手 · 帧序 · 确定性契约 |
 | [MMDPhysics 骨骼同步层](physics/mmd-physics.md) | Update 三相位 · 开关（S1/S2/S3）· Reset · 抖动阻尼 |
-| [World 与内核类型](physics/world.md) | 确定性步进 · 风 · 刚体/关节定义 · 内置地面 · 碰撞与求解 |
+| [World 与内核类型](physics/world.md) | 确定性步进 · 风 · 刚体 / 关节定义 · 内置地面 · 碰撞与求解 |
 
-### ⑥ 平台集成
+### 6. 平台集成
 
 | 文档 | 说明 |
 |---|---|
 | [桌面 GLFW 集成](platform-integration/desktop-glfw.md) | 窗口创建、GLFW 鼠标回调 → Engine 层转发 |
-| [Android 集成](platform-integration/android.md) | Activity + View.OnTouchListener + EGL 上下文（伪代码骨架） |
+| [Android 集成](platform-integration/android.md) | Activity + View.OnTouchListener + EGL 上下文（骨架） |
 
-### ⑦ 未来模块
+---
 
-| 模块 | 状态 |
+## 尚未实现的能力
+
+以下能力当前版本不提供，调用方需自行规避或等待后续版本：
+
+| 能力 | 现状 |
 |---|---|
-| SDEF 球形变形（真实现，当前退化为 Bdef2） | 🚧 |
-| 共享光空间 / 多模型场景 | 🚧 |
-| 渲染侧材质 morph uniform 逐材质应用 | 🚧 |
-| VMD 相机 / 光照动画轨道 | 🚧 |
-| Android 移植验证 | 🚧 |
-
-### ⑧ Demo 交互速查（`samples/MikuEngine.Demo`）
-
-```bash
-dotnet run --project samples/MikuEngine.Demo                    # 自动找 Model/1/1.pmx
-dotnet run --project samples/MikuEngine.Demo -- path/to/x.pmx   # 显式指定模型
-```
-
-| 输入 | 功能 |
-|---|---|
-| 鼠标 左键 / 右键 / 滚轮 | 轨道相机：旋转 / 平移 / 缩放 |
-| `I`/`K` · `J`/`L` · `U`/`O` | 模型面板 **移動**（Y / X / Z 世界轴，0.5/步；`Shift` 微调 0.1） |
-| `Alt` + 同上键 | 模型面板 **回転**（`I`/`K`=X · `J`/`L`=Y · `U`/`O`=Z，∓15°/步，MMD YXZ 序） |
-| `.` / `,` | **拡大率** 全体放大 / 缩小（×1.1，渲染层，与物理解耦） |
-| `Shift+.` / `Shift+,` | 只拉伸 / 只压扁 Z 轴（压纸片测试） |
-| `R` | 重置全部模型变换（移動 / 回転 / 拡大率） |
-| 空格 / `←→` / `↑↓` / `F` | 动画：暂停/播放 · ∓1 帧 · 帧率 ±6 · 回首帧 |
-| `E` | 轮廓线开关 |
-| `1` / `2` / `0` | 自阴影：开 / 自阴影+床影 / 关 |
-| `S` | 自阴影风格循环（PE 标准 16-tap → 硬边本影 → 软影） |
-| `P` / `G` / `H` | 物理：模拟总开关（S1）/ 地面碰撞（S2）/ 物理后付与（S3） |
-
-> 自動加载 `Motion/動作+IK.vmd`（骨动效 + 足ＩＫ 目标 + 表情，单层）；
-> 想换回「Motion + Lips/Eyes/Facial 四层」形态，改 `Program.cs` 里的 `motionFiles` 数组即可。
-
-### 无人值守验收（CI 友好）
-
-| 参数 | 验收内容 |
-|---|---|
-| `--smoke` | 渲染自检：Z 图统计 + 三种阴影风格与床影的**贡献象素**量化 |
-| `--anim-smoke` | 多层动画播放：90 帧无异常 + 混合器状态 + 求值耗时 |
-| `--ik-smoke[=N]` | IK 收敛：逐帧打印「目标(足ＩＫ) vs 被驱动端(足首)」距离，判定 < 1 模型单位 |
-| `--xform-smoke` | 模型变换端到端：TR 注入 全ての親 / 操作中心不动 / 拡大率 不碰 `WorldMatrices` / 重置幂等 |
-
-`--ik-smoke` 附带数据导出：`--ik-dump=<path>`（rig + FK + IK 结果 JSON，供 reze 求解器对拍）、
-`--ik-bake-dump=<path>`（逐帧最终局部旋转，供 mmdbridge 烘焙对拍）、`--ik-frame=<N>`（导出帧号）。
+| SDEF 球形变形 | 解析支持，求值退化为 Bdef2 |
+| QDEF 四元数变形 | 解析支持，求值退化为 Bdef4 |
+| VMD 光照动画轨道 | 解析仅计数，不消费（相机动画已支持，见 [camera.md](core/animation/camera.md)） |
+| VMD property 的 IK 开关接线 | 已解析保留，未接入求解器使能位 |
+| PMX 骨的「外部親変形」标志（0x2000） | 解析保留，运行时未消费（跨模型绑定走 VMD 路径，见 [external-parent.md](core/animation/external-parent.md)） |
+| 多模型共享光照 / 多 caster 阴影 | 未实现：每个模型各自的 `GlesModelRenderer` 与时间轴；子模型可共用主模型的自阴影 Z 图（只由主模型投射） |
+| Android 集成 | 未验证 |
 
 ---
 
@@ -163,7 +136,7 @@ grid.Draw(viewProjSpan);  // GlesGridRenderer
 // 1. 从磁盘加载（一步完成 PMX 解析 + SkeletalModel 转换 + 纹理上传 + 自阴影预处理）
 var modelRenderer = GlesModelRenderer.LoadFromFile(device, "path/to/model.pmx");
 
-// 2. 每帧（简化版，完整流程见 model-renderer 文档）
+// 2. 每帧（简化版，完整流程见 gles-model-renderer 文档）
 camera.Aspect = width / (float)height;
 Span<float> viewProj = stackalloc float[16];
 camera.ComputeViewProj(viewProj);
@@ -196,7 +169,7 @@ var anim = MmdAnimation.FromVmd(VmdParser.Parse(File.ReadAllBytes("motion.vmd"))
 var timeline = new MmdTimeline();
 timeline.AddLayer(new MmdAnimationLayer(anim));
 
-// 2. 注入物理内核（PMX 刚体/关节 → 内核定义；S2/S3 开关默认开）
+// 2. 注入物理内核（PMX 刚体 / 关节 → 内核定义；S2/S3 开关默认开）
 var pmx = PmxParser.Parse(File.ReadAllBytes("model.pmx"));
 modelRenderer.Physics = new MMDPhysics(
     pmx.RigidBodies.Select(RigidBodyDef.FromPmx).ToArray(),
@@ -205,22 +178,41 @@ modelRenderer.Physics = new MMDPhysics(
 // 3. 每帧：
 timeline.Apply(model);                                  // 采样 + 混合写回
 MmdMorphEvaluator.Evaluate(model);                      // 表情求值
-modelRenderer.ModelScale = new Vector3(1, 1, 1);        // 拡大率（可选，渲染层，与物理解耦）
+modelRenderer.ModelScale = new Vector3(1, 1, 1);        // 缩放倍率（可选，渲染层，与物理解耦）
 modelRenderer.PhysicsFrame = timeline.CurrentFrame;     // 物理 tick 时钟随动画帧号
-modelRenderer.PrepareFrame(in frame);                   // 内部依次：面板变换 → 根矩阵 →
+modelRenderer.PrepareFrame(in frame);                   // 内部依次：模型变换 → 根矩阵 →
                                                         // IK → 世界矩阵 → 物理写回 →
-                                                        // 物理后付与 → 蒙皮/上传
+                                                        // 物理后赋予 → 蒙皮 / 上传
 modelRenderer.Draw(in frame);
 ```
 
-详细用法见各子文档。
+各环节的详细用法见对应子文档。
+
+### 流程 D：相机动画 / 跨模型挂载（可选扩展）
+
+```csharp
+// VMD 相机动画（与模型动效共用同一帧号）
+if (anim.CameraTrack is { IsEmpty: false } ct && ct.Sample(timeline.CurrentFrame, out var pose))
+{
+    camera.SetVmdDriven(true);                       // 进入驱动态（输入自动短路）
+    camera.SetVmdPose(pose.Target, pose.RotationEuler, pose.Distance, pose.Fov);
+}
+frame.CameraPosition = new Vector4(camera.GetEyePosition(), 0f);   // 视差量取视点
+
+// 外部親：把子模型挂到亲模型骨骼上（先亲后子）
+var ext = new MmdExternalParentController();
+ext.Register("角色", parentRenderer.Model);
+ext.Register("道具", childRenderer.Model, childAnimation);
+// 每帧：亲模型 PrepareFrame → ext.Update(timeline.CurrentFrame) → 子模型 PrepareFrame
+```
+
+详见 [camera.md](core/animation/camera.md) 与 [external-parent.md](core/animation/external-parent.md)。
 
 ---
 
-## 文档维护指南
+## 文档约定
 
-- **新增模块文档** → 在对应子目录加 `.md` 文件，并在**本文件**和该子目录的 `index.md` 里追加一行链接
-- **修改已有文档** → 直接编辑对应 `.md` 文件，本文件的链接无需改动（锚点不变）
-- **标记未实现** → 在链接后加 `🚧`
-- **命名约定** → 文件名小写 + 连字符（`orbit-camera.md`），标题可读（`# OrbitCamera API`）
-- **图示** → 代码内联，坐标系等需要图示的地方用 ASCII art
+- 命名：文件名小写 + 连字符（`orbit-camera.md`），标题可读（`# OrbitCamera API`）
+- 新增模块文档：在对应子目录加 `.md`，并在本文件与该子目录的 `index.md` 各追加一行链接
+- 图示：代码内联；坐标系等需要图示的地方用 ASCII art
+- 用词：除骨骼名（如 全ての親、足ＩＫ）与 PMX / VMD 字段名外，统一使用简体中文

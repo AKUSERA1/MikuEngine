@@ -7,11 +7,10 @@
 ## 显示帧率与动画帧率解耦
 
 渲染循环跑显示器的 vsync，动画只由**连续帧号** `CurrentFrame` 表达，两者仅通过游标耦合。
-采样在连续帧号上插值（**不 floor 到整数帧**），所以 30fps 动效在 144Hz 屏上依旧平滑；
+采样在连续帧号上插值（**不 floor 到整数帧**），所以 30fps 动效在高刷屏上依旧平滑；
 若错误取整会出现 30fps 步进抖动。
 
-因为采样是帧号的纯函数（见 [MmdAnimation.SampleInto](../../../src/MikuEngine.Core/Animation/MmdAnimation.cs)），
-任何改变游标的操作（跳帧 / seek / 暂停 / 改帧率）都不动采样逻辑。
+因为采样是帧号的纯函数，任何改变游标的操作（跳帧 / seek / 暂停 / 改帧率）都不动采样逻辑。
 
 ---
 
@@ -50,11 +49,16 @@ anim.Sample(model, player.CurrentFrame);   // 采样写回模型
 | `Seek(frame)` | 方法 | 直接定位（钳制到区间） |
 | `Step(frames)` | 方法 | 相对当前帧步进（钳制到区间） |
 
+> `Advance` 的参数是**秒**（wall delta），帧号推进量 = `dt × PlaybackFps`。
+> 物理侧的 tick 时钟同样以帧号为准，因此不要用「每帧固定加 1」来驱动 30fps 动效——
+> 换用 `RealTime` 模式，否则在高刷新率下动画会加速。
+
 ---
 
 ## MmdPoseBuffer（采样输出缓冲）
 
-一层采样的结果容器。**多动效混合时所有层复用同一个实例**（采样是纯函数，每层采样前都会整体复位）。
+一层采样的结果容器。**多动效混合时所有层复用同一个实例**
+（采样是纯函数，每层采样前都会整体复位）。
 
 ```csharp
 var buffer = MmdPoseBuffer.ForModel(model);   // 尺寸 = 模型骨数 / morph 数
@@ -68,6 +72,8 @@ buffer.Reset();                                // 复位到「绑定姿势 + 无
 | `MorphWeights` | `float[]` | VMD 原始权重（复位 = 0） |
 | `CoveredBones` | `List<int>` | 本次采样覆盖到的骨索引 |
 | `CoveredMorphs` | `List<int>` | 本次采样覆盖到的 morph 索引 |
+| `BoneCount` / `MorphCount` | `int` | 缓冲尺寸 |
+| `Matches(model)` | 方法 | 尺寸是否与模型一致（判断是否需要重建缓冲） |
 
 未覆盖的项保持复位值；「层只覆盖一部分骨 / morph」靠 `CoveredBones` / `CoveredMorphs` 显式记录，
 混合器用它算「覆盖该项的权重和」（残差混回绑定姿势）。
@@ -89,7 +95,7 @@ anim.Sample(model, frame);
 1. `buffer.Reset()` 整体复位到绑定姿势 + 无表情；
 2. 逐骨骼轨道写 `Rotations[index]` / `Translations[index]`，并记录进 `CoveredBones`；
 3. 逐表情轨道写 `MorphWeights[index]`（同名 morph 全部槽位），并记录进 `CoveredMorphs`；
-4. **只写局部 T/R 与原始 morph 权重，不重算世界矩阵**——世界矩阵由调用方的 `PrepareFrame` 负责。
+4. **只写局部 T/R 与原始 morph 权重，不重算世界矩阵**——世界矩阵由调用方的后续步骤负责。
 
 `Sample` 在其基础上把缓冲写回模型：
 
@@ -99,6 +105,14 @@ anim.Sample(model, frame);
 
 > 单动效路径下，可见性（`Visible`）由调用方按 `anim.SampleVisible(frame)` 写回；
 > 走混合器时可见性由 `MmdAnimationMixer.Evaluate` 统一写回（见 [visibility.md](visibility.md)）。
+
+单轨取值的轻量包装（不做整体复位，只读一条轨道）：
+
+```csharp
+Quaternion rot = track.SampleRotation(frame);   // 只取旋转
+Vector3    off = track.SampleOffset(frame);     // 只取父空间平移偏移
+```
+> 采样完成后还要跑表情求值（`MmdMorphEvaluator.Evaluate`），否则骨 morph 不会生效。
 
 ---
 

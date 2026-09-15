@@ -1,12 +1,13 @@
 # Android 集成
 
-🚧 **待实现**。
+**当前版本未验证**：Android 目标框架尚未加入，本页给出的是可预期的骨架。
 
 架构与桌面完全相同，只是：
+
 1. 窗口宿主从 GLFW 换成 `Android.App.Activity` + `AndroidGameView`（EGL 上下文）
 2. 输入绑定从 GLFW 回调换成 `View.OnTouchListener`
 
-## 预期代码骨架（伪代码）
+## 骨架
 
 ```csharp
 // Activity.OnCreate
@@ -26,6 +27,11 @@ glView.Touch += (v, e) => {
                 input.OnPointerMove(e.GetPointerId(i), e.GetX(i), e.GetY(i)); break;
         case MotionEventActions.Up:
             input.OnPointerUp(e.ActionIndex); break;
+        case MotionEventActions.PointerDown:   // 多指场景必须处理，否则捏合失效
+            input.OnPointerDown(e.ActionIndex,
+                e.GetX(e.ActionIndex), e.GetY(e.ActionIndex)); break;
+        case MotionEventActions.PointerUp:
+            input.OnPointerUp(e.ActionIndex); break;
     }
 };
 
@@ -43,23 +49,25 @@ glView.Render += () => {
 
 | 层 | 桌面 GLFW | Android | 统一吗 |
 |---|---|---|---|
-| Core (OrbitCamera) | ✅ 完全相同 | ✅ 完全相同 | ✅ |
-| Engine (OrbitInputController) | ✅ 完全相同 | ✅ 完全相同 | ✅ |
-| Render (GlesDevice + GlesGridRenderer) | ✅ GLSL 310 es | ✅ GLSL 310 es | ✅ |
+| Core (OrbitCamera) | 完全相同 | 完全相同 | 是 |
+| Engine (OrbitInputController) | 完全相同 | 完全相同 | 是 |
+| Render (GlesDevice + GlesGridRenderer) | GLSL 310 es | GLSL 310 es | 是 |
 | 平台层转发 | GLFW 回调 → OnXXX | MotionEvent → OnXXX | 架构相同 |
 | 窗口 / GL 上下文 | GLFW + GL.GetApi | AndroidGameView + EGL | **不同** |
 
 ## 依赖项（Android 目标）
 
-需要在 Android 项目里替换 Silk.NET.Windowing.Glfw 为：
+需要在 Android 项目里替换 `Silk.NET.Windowing.Glfw`：
+
 - `Xamarin.Android` 自带的 EGL 支持
 - 或 `Silk.NET.OpenGL`（跨平台入口不变）
 
 具体包版本待定。
 
-## 下一步行动
+## 待补充
 
-Android 集成实现后：
-1. 本章移除 🚧 标记
-2. 替换伪代码为真实代码
-3. 补充 EGL 上下文创建 / SurfaceView 切换 / 生命周期（OnPause / OnResume）等细节
+实现并验证后需要补齐：
+
+1. EGL 上下文创建 / SurfaceView 切换的细节
+2. 生命周期（`OnPause` / `OnResume`）与 GL 上下文丢失后的资源重建
+3. 触控坐标与显示密度（DPI）的换算

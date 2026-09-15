@@ -1,7 +1,6 @@
 # 桌面 GLFW 集成
 
-本页讲解 Silk.NET.Windowing.Glfw 2.23 + Silk.NET.GLFW 的输入绑定方式。  
-完整代码见 [Program.cs](../../samples/MikuEngine.Demo/Program.cs)。
+本页讲解 Silk.NET.Windowing.Glfw 2.23 + Silk.NET.GLFW 的输入绑定方式。
 
 ## 窗口创建
 
@@ -11,7 +10,7 @@ using Silk.NET.Windowing;
 
 var options = WindowOptions.Default;
 options.Size = new Vector2D<int>(960, 600);
-options.Title = "MikuEngine Demo";
+options.Title = "MikuEngine";
 options.VSync = true;
 using var window = Window.Create(options);
 ```
@@ -22,11 +21,14 @@ using var window = Window.Create(options);
 gl = GL.GetApi((IGLContext)window.GLContext!);
 ```
 
-Silk.NET.OpenGL 2.23 统一入口类：桌面加载 OpenGL，Android 加载 GLES 函数指针。**调用方无需条件编译**。
+Silk.NET.OpenGL 2.23 是统一入口类：桌面加载 OpenGL，Android 加载 GLES 函数指针。
+**调用方无需条件编译**。
 
-## 输入绑定：为什么用 GLFW 原生 API
+## 输入绑定：使用 GLFW 原生 API
 
-Silk.NET.Windowing 2.23 的 `IWindow` 接口**不暴露**鼠标 / 键盘 / 触控事件——需要 `Silk.NET.Input` + `Silk.NET.Input.Glfw` 额外依赖，但那条路径在当前版本不工作（`IWindow.Input` 属性不存在）。
+Silk.NET.Windowing 2.23 的 `IWindow` 接口**不暴露**鼠标 / 键盘 / 触控事件；
+`Silk.NET.Input` + `Silk.NET.Input.Glfw` 那条路径在当前版本不可用
+（`IWindow.Input` 属性不存在）。
 
 **正确做法**：直接用 `Silk.NET.GLFW` 原生回调：
 
@@ -88,20 +90,18 @@ unsafe
 
 ### 三个回调委托签名
 
-通过反射 Silk.NET.GLFW 2.23 确认：
-
 | 方法 | 回调委托签名 |
 |---|---|
 | `SetMouseButtonCallback` | `(WindowHandle*, MouseButton, InputAction, KeyModifiers) → void` |
 | `SetCursorPosCallback` | `(WindowHandle*, double x, double y) → void` |
 | `SetScrollCallback` | `(WindowHandle*, double xOff, double yOff) → void` |
 
-枚举 `MouseButton` / `InputAction` 与 GLFW C API 一致，可直接和 `OrbitInputController.PointerButton` 映射。
+枚举 `MouseButton` / `InputAction` 与 GLFW C API 一致，可直接和
+`OrbitInputController.PointerButton` 映射。
 
-## pointerId 约定
-
-鼠标永远用 `pointerId = 0`。GLFW 不提供触控 API（桌面），所以 Demo 只用 0。  
-Android 上 `pointerId` 用 `MotionEvent.getPointerId(i)` 的返回值（1, 2, ...）。
+回调内取到的坐标是**窗口客户区坐标**（左上原点，y 向下），与
+`OrbitInputController` 期望的屏幕坐标一致；GLFW 不提供触控 API，
+桌面端 pointerId 只用 `0`。
 
 ## 生命周期完整清单
 
@@ -140,6 +140,6 @@ window.Run();
 | 坑 | 症状 | 解法 |
 |---|---|---|
 | 用 `Silk.NET.Input.Glfw` 而不是 `Silk.NET.GLFW` | 编译报错 `IWindow.Input 不存在` | 直接用 GLFW 原生 API |
-| 忘记 `unsafe` 块 | `GlfwWindowing.GetHandle` 返回指针，必须 unsafe | 包装 unsafe { } |
+| 忘记 `unsafe` 块 | `GlfwWindowing.GetHandle` 返回指针，必须 unsafe | 包装 `unsafe { }` |
 | Viewport 没调 | 渲染正常但 resize 后内容拉伸 / 压缩 | `FramebufferResize` 事件里调 `device.Resize` |
-| GLFW 回调里持有 GL 引用 | 没问题（回调在 GL 线程上），但不要在非 Load/Render 线程调 GL | 保持 GL 调用集中在 Load + Render |
+| GLFW 回调里持有 GL 引用 | 本身没问题（回调在 GL 线程上） | 但不要在非 Load / Render 线程调 GL，保持 GL 调用集中在 Load + Render |

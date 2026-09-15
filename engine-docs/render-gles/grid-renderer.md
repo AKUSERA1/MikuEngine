@@ -24,7 +24,8 @@ grid.Dispose();
 
 ## Uniform 布局（GridUniform）
 
-`GridUniform` 用 `[StructLayout(LayoutKind.Explicit, Pack = 1, Size = 192)]` 显式布局，总大小 192 字节。ViewProj 是列主序 `float[16]`（64 字节），通过 `SetViewProj(ReadOnlySpan<float>)` 一次性填充：
+`GridUniform` 用 `[StructLayout(LayoutKind.Explicit, Pack = 1, Size = 192)]` 显式布局，总大小 192 字节。
+ViewProj 是列主序 `float[16]`（64 字节），通过 `SetViewProj(ReadOnlySpan<float>)` 一次性填充：
 
 | 偏移 | 字段 | 类型 | 说明 |
 |---|---|---|---|
@@ -42,9 +43,11 @@ grid.Dispose();
 
 ## 深度写入 = false 的理由
 
-`GlesGridRenderer.Draw` 里显式设 `gl.DepthMask(false)` 然后在返回前还原 `gl.DepthMask(true)`。
+`GlesGridRenderer.Draw` 里显式设 `gl.DepthMask(false)`，然后在返回前还原 `gl.DepthMask(true)`。
 
-原因：格网和床影（floor shadow）都在 y=0 平面上绘制。如果两者都写深度，逐像素深度会有几个 ULP 的差，出现斑纹闪烁（z-fight）。关掉格网的深度写入后，两者之间根本不存在深度比较，问题从机制上消失。这与 PmxEditor 的做法一致——PE 床影 pass 同样设 `ZWRITEENABLE = false`。
+原因：格网和床影（floor shadow）都在 y = 0 平面上绘制。如果两者都写深度，
+逐像素深度会有几个 ULP 的差，出现斑纹闪烁（z-fight）。关掉格网的深度写入后，
+两者之间根本不存在深度比较，问题从机制上消失。
 
 ## Shader 版本
 
@@ -55,9 +58,12 @@ precision mediump float;
 
 GLES 3.1 兼容。桌面 OpenGL 上 Silk.NET.OpenGL 自动加载，不需要改版本号。
 
-## 不是"真正的地面"
+## 不是「真正的地面」
 
 这是**调试 / 占位格网**：
+
 - 只有线框，没有法线 / 材质 / 物理碰撞
 - 用于相机控制和视锥裁剪的快速验证
-- 真正的地面渲染（可能包含地形 / 物理刚体 / Toon Shader）后续实现
+- 真正的地面渲染（地形 / 物理刚体 / Toon Shader）需要自行实现
+
+物理侧另有自己的内置地面盒（见 [world.md](../physics/world.md)），与这里的可视格网无关。

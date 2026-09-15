@@ -16,7 +16,7 @@ Mat4 是 `float[]` 列主序工具（物理内核与骨骼同步层用）。
 MmdMath.EulerOrderYxz   // = "YXZ" — MMD VMD 中角度限制按此顺序应用
 ```
 
-## 方法
+## MmdMath 方法
 
 ### QuaternionFromYxzEuler
 
@@ -24,7 +24,7 @@ MmdMath.EulerOrderYxz   // = "YXZ" — MMD VMD 中角度限制按此顺序应用
 public static Quaternion QuaternionFromYxzEuler(float y, float x, float z);
 ```
 
-按 YXZ 顺序把欧拉角转换为四元数。`System.Numerics.Quaternion.CreateFromYawPitchRoll` 本身就是 YXZ 顺序的实现，本方法直接转发。
+按 YXZ 顺序把欧拉角转换为四元数。
 
 | 参数 | 含义 |
 |---|---|
@@ -38,16 +38,16 @@ public static Quaternion QuaternionFromYxzEuler(float y, float x, float z);
 public static Vector3 YxzEulerFromQuaternion(Quaternion q);
 ```
 
-四元数 → YXZ 欧拉角。MMD IK 求解器需要这个来做角度限制。
-
+四元数 → YXZ 欧拉角。IK 求解器需要这个来做角度限制。
 内部处理了万向锁（`|sinX| >= 1` 时 X 取 ±π/2，Y 和 Z 归零）。
 
 返回的 `Vector3`：
+
 - `X` = pitch（绕 +X）
 - `Y` = yaw（绕 +Y）
 - `Z` = roll（绕 +Z）
 
-## 使用示例
+### 使用示例
 
 ```csharp
 using MikuEngine.Core.Math;
@@ -63,19 +63,21 @@ Vector3 euler = MmdMath.YxzEulerFromQuaternion(q);
 // euler.Y ≈ π/2, euler.X ≈ 0, euler.Z ≈ 0
 ```
 
-## MMD 欧拉角顺序说明
+### MMD 欧拉角顺序
 
-MMD 的 VMD 中，关节角度限制用的就是 YXZ 顺序：先绕 Y（yaw），再绕 X（pitch），最后绕 Z（roll）。这是 MikuMikuDance 约定的固定顺序，不能与 Unity（XYZ）或 Unreal（ZYX）混淆。
+MMD 的 VMD 中，关节角度限制用的是固定 YXZ 顺序：先绕 Y（yaw），再绕 X（pitch），
+最后绕 Z（roll）。**不要与 Unity（XYZ）或 Unreal（ZYX）的顺序混淆**——
+顺序错了角度限制的行为会完全不同。
 
 ## QuatMath（四元数补集）
 
-`System.Numerics.Quaternion` 缺失的运算补充，主要服务物理内核（刚体积分 / 接触求解），
-行为注释与 reze 同源。全为静态方法：
+`System.Numerics.Quaternion` 缺失的运算补充，主要服务物理内核（刚体积分 / 接触求解）。
+全为静态方法：
 
 | 方法 | 用途 |
 |---|---|
 | `Slerp(a, b, t)` | 球面插值（dot 为负自动取短弧） |
-| `Nlerp(a, b, t)` | 半球对齐归一化线性插值（快，混合器用它） |
+| `Nlerp(a, b, t)` | 半球对齐归一化线性插值（快，动画混合器用它） |
 | `RotateVec(q, v)` / `RotateVecInv(q, v)` | 向量旋转 q·v·q⁻¹ / q⁻¹·v·q |
 | `FromAxisAngle(ax, ay, az, angle)` | 轴角 → 四元数（轴自动归一化） |
 | `FromBasis(x, y, z)` | 3×3 基（列 x/y/z）→ 四元数（Shepperd 法） |
@@ -83,9 +85,12 @@ MMD 的 VMD 中，关节角度限制用的就是 YXZ 顺序：先绕 Y（yaw）�
 | `TwistAroundAxis(q, a)` | 提取绕轴 a 的扭转分量（swing-twist 分解） |
 | `FromEuler(rotX, rotY, rotZ)` | 欧拉角（弧度）→ 四元数（物理刚体 bind 朝向用） |
 
+> `System.Numerics.Quaternion` 只提供 `Q * float`，没有 `float * Q`——
+> 写缩放时把标量放在右侧。
+
 ## Mat4 补充接口
 
-`Mat4`（float[] 列主序工具）新增 / 相关：
+`Mat4`（float[] 列主序工具）相关方法：
 
 | 方法 | 用途 |
 |---|---|
@@ -96,7 +101,7 @@ MMD 的 VMD 中，关节角度限制用的就是 YXZ 顺序：先绕 Y（yaw）�
 
 ## ModelRootTransform（渲染层根矩阵）
 
-模型面板 拡大率 / 无载体 TR 的纯数学部分（`System.Numerics` 行主序 row-vector 约定）。
+缩放倍率 / 无载体 TR 的纯数学部分（`System.Numerics` 行主序 row-vector 约定）。
 完整语义见 [model-transform.md](model-transform.md)。
 
 | 成员 | 说明 |

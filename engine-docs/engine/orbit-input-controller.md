@@ -1,8 +1,9 @@
 # OrbitInputController API
 
-跨平台轨道相机输入控制器。**调用方只需传入一个 `bool enabled` 开关，平台层负责最薄的一层事件转发。**
+跨平台轨道相机输入控制器。**调用方只需传入一个 `bool enabled` 开关，
+平台层负责最薄的一层事件转发。**
 
-## 设计哲学
+## 分层
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -10,7 +11,7 @@
 │ GLFW 回调 / Android MotionEvent / iOS Touch          │
 │  └─ 只做：原生事件 → OnPointerDown/Move/Up / OnScroll │
 ├─────────────────────────────────────────────────────┤
-│ ★ OrbitInputController（Engine 层，纯 C# 标准库）    │
+│ OrbitInputController（Engine 层，纯 C# 标准库）      │
 │  手势识别 + enabled 开关 + 灵敏度                     │
 ├─────────────────────────────────────────────────────┤
 │ OrbitCamera（Core 层，纯数学）                        │
@@ -18,7 +19,8 @@
 └─────────────────────────────────────────────────────┘
 ```
 
-Engine 层是**唯一**应该调整灵敏度的地方。Core 层 OrbitCamera 的三个 sensitivity 字段保持 `1.0`（no-op）。
+Engine 层是**唯一**应该调整灵敏度的地方。Core 层 OrbitCamera 的三个 sensitivity 字段
+保持 `1.0`（no-op）。
 
 ## 源文件
 
@@ -38,9 +40,25 @@ input.Enabled = false;  // 全部 OnXXX 调用直接返回，相机不动
 ```
 
 场景举例：
+
 - 游戏运行时：启用
 - UI 弹窗 / 场景切换动画期间：禁用
 - 做相机插值动画（timeline）期间：禁用，动画完了再启用
+
+### InputAllowed（只读生效位）
+
+```csharp
+public bool InputAllowed => Enabled && !_camera.VmdDriven;
+```
+
+四个输入入口（`OnPointerDown` / `OnPointerMove` / `OnPointerUp` / `OnScroll`）
+实际判定的是 `InputAllowed` 而不是 `Enabled`：
+
+- 相机处于 **VMD 驱动**态时，输入**自动短路**——VMD 相机动画独占视图，
+  此时 orbit / pan / zoom 操作的是一组与取景无关的参数（改它既看不见也没有意义）。
+- 宿主不需要为此手动禁用控制器；VMD 播放结束、`SetVmdDriven(false)` 后输入自动恢复。
+- `Enabled` 仍是总开关：需要无条件屏蔽输入时用它。
+- 想知道「当前此刻是否真的会响应输入」时读 `InputAllowed`。
 
 ## 手势映射
 
@@ -51,7 +69,7 @@ input.Enabled = false;  // 全部 OnXXX 调用直接返回，相机不动
 | 鼠标滚轮 ↑↓ | Zoom | `camera.Zoom(-deltaY)` |
 | 单指 + 拖拽 | Orbit | 同鼠标左键 |
 | 双指 + 中心平移 | Pan | 同鼠标右键 |
-| 双指 + 捏合/张开 | Zoom | `Zoom((1 - ratio) * sensitivity)` |
+| 双指 + 捏合 / 张开 | Zoom | `Zoom((1 - ratio) * sensitivity)` |
 
 ### 鼠标 vs 触控的 pointerId 约定
 
@@ -60,7 +78,8 @@ input.Enabled = false;  // 全部 OnXXX 调用直接返回，相机不动
 | `0` | 鼠标（永远 0） |
 | `1, 2, ...` | 触控点（Android `MotionEvent.getPointerId(i)` 的返回值） |
 
-Engine 层**不依赖这个约定**——它只看按下/移动/抬起的时序和活跃指针数量——但平台层应该一致使用。
+Engine 层**不依赖这个约定**——它只看按下 / 移动 / 抬起的时序和活跃指针数量——
+但平台层应该一致使用。
 
 ## 灵敏度配置
 
@@ -69,30 +88,33 @@ Engine 层**不依赖这个约定**——它只看按下/移动/抬起的时序�
 ```csharp
 var input = new OrbitInputController(camera, enabled: true)
 {
-    RotationSensitivity = 0.0025f,   // 默认 0.0025 rad/px ≈ 0.14°/px
-    PanSensitivity      = 0.003f,    // 默认 0.003 × Radius 单位/px
-    WheelZoomSensitivity = 1.0f,     // 默认 1.0 单位/滚轮格
-    PinchZoomSensitivity = 50.0f,    // 默认 50 单位 / 捏合比例变化
+    RotationSensitivity  = 0.0025f,   // 默认 0.0025 rad/px ≈ 0.14°/px
+    PanSensitivity       = 0.003f,    // 默认 0.003 × Radius 单位/px
+    WheelZoomSensitivity = 1.0f,      // 默认 1.0 单位/滚轮格
+    PinchZoomSensitivity = 50.0f,     // 默认 50 单位 / 捏合比例变化
 };
 ```
 
-### 灵敏度默认值对照表（×100 修正后）
+| 属性 | 默认值 | 有效效果 |
+|---|---|---|
+| `RotationSensitivity` | 0.0025 | 1 像素 ≈ 0.14° 旋转 |
+| `PanSensitivity` | 0.003 | 1 像素 ≈ 0.3 单位（R = 100）平移 |
+| `WheelZoomSensitivity` | 1.0 | 1 滚轮格 = 1 单位 |
+| `PinchZoomSensitivity` | 50.0 | 双指距离变化 10% → Radius 变 5 单位 |
 
-| 属性 | 旧默认（两层相乘） | 新默认（Engine 唯一入口） | 有效效果 |
-|---|---|---|---|
-| `RotationSensitivity` | 0.005 × 0.005 | **0.0025** | 1 像素 ≈ 0.14° 旋转 |
-| `PanSensitivity` | 0.15 × 0.0002 | **0.003** | 1 像素 ≈ 0.3 单位（R=100）平移 |
-| `WheelZoomSensitivity` | 1.0 × 0.01 | **1.0** | 1 滚轮格 = 1 单位 |
-| `PinchZoomSensitivity` | 0.5 | **50.0** | 双指距离变化 10% → Radius 变 5 单位 |
+> **不要同时改 Core 层与 Engine 层的灵敏度**：OrbitCamera 侧已固定为 1.0，
+> 改它不会有任何效果。只在这里调。
 
 ### 各平台可能的预设值
+
+触控屏的手指拖动距离比鼠标长，通常需要更高的旋转 / 平移灵敏度：
 
 ```csharp
 #if ANDROID
     var input = new OrbitInputController(camera)
     {
-        RotationSensitivity = 0.004f,   // 触控屏需要更高（手指拖动距离长）
-        PanSensitivity      = 0.005f,
+        RotationSensitivity  = 0.004f,
+        PanSensitivity       = 0.005f,
         PinchZoomSensitivity = 80.0f,
     };
 #else
@@ -100,18 +122,18 @@ var input = new OrbitInputController(camera, enabled: true)
 #endif
 ```
 
-### 实时 UI 调优（Inspector 风格）
+### 实时 UI 调优
 
 ```csharp
-// 比如用 Dear ImGui 或类似工具
-input.RotationSensitivity = ImGui.SliderFloat("旋转灵敏度", input.RotationSensitivity, 0.0005f, 0.02f);
-input.PanSensitivity      = ImGui.SliderFloat("平移灵敏度", input.PanSensitivity, 0.0005f, 0.02f);
+input.RotationSensitivity  = ImGui.SliderFloat("旋转灵敏度", input.RotationSensitivity, 0.0005f, 0.02f);
+input.PanSensitivity       = ImGui.SliderFloat("平移灵敏度", input.PanSensitivity, 0.0005f, 0.02f);
 input.WheelZoomSensitivity = ImGui.SliderFloat("缩放灵敏度", input.WheelZoomSensitivity, 0.1f, 10f);
 ```
 
 ## 平台层调用的输入入口
 
-**平台层必须**把原生 API 事件转发到这四个方法。详细代码 → [platform-integration/](../platform-integration/) 章节。
+**平台层必须**把原生 API 事件转发到这四个方法。详细代码 →
+[platform-integration](../platform-integration/index.md) 章节。
 
 ### 方法签名
 
@@ -174,11 +196,15 @@ view.Touch += (v, e) => {
 };
 ```
 
+> 触控要处理 `PointerDown` / `PointerUp`（多指场景），只处理 `Down` / `Up` 会让
+> 从单指切到双指时活跃指针数永远停在 1，捏合缩放失效。
+
 ## 底层实现说明（给想改手势逻辑的人）
 
 ### 指针追踪
 
 用 `Dictionary<int, Vector2> _pointers` 记录所有活跃指针的最新位置。
+
 - `OnPointerDown` 时加入字典
 - `OnPointerMove` 时更新
 - `OnPointerUp` 时移除
@@ -193,7 +219,7 @@ view.Touch += (v, e) => {
   2 → 0    全部结束
 
 OnPointerMove 时判断：
-  鼠标（pointerId=0）→ 看 _leftMouseDown / _rightMouseDown
+  鼠标（pointerId = 0）→ 看 _leftMouseDown / _rightMouseDown
   1 个活跃指针         → 单指 Orbit
   2 个活跃指针         → Pan（中心平移）+ Zoom（捏合比例变化）
 ```
@@ -201,6 +227,7 @@ OnPointerMove 时判断：
 ### 双指捏合的 Zoom 累积
 
 双指模式下，每帧：
+
 1. 计算当前两指距离
 2. 算比例 `ratio = currentDistance / initialDistance`
 3. 应用 `Zoom((1 - ratio) * PinchZoomSensitivity)`

@@ -1,6 +1,6 @@
 # GlesDevice
 
-GL 上下文包装 + Shader 编译 + VBO/UBO/SSBO 辅助方法。
+GL 上下文包装 + Shader 编译 + VBO / UBO / SSBO 辅助方法。
 
 ## 源文件
 
@@ -20,6 +20,7 @@ gl = GL.GetApi((IGLContext)window.GLContext!);
 ```
 
 构造时自动初始化全局状态：
+
 - 启用深度测试（`DepthTest`）
 - 启用混合（`Blend`，`SrcAlpha / OneMinusSrcAlpha`）
 - 设置清屏色为中性灰蓝（`DefaultClearColor = (0.11, 0.14, 0.22, 1.0)`）
@@ -43,6 +44,8 @@ gl = GL.GetApi((IGLContext)window.GLContext!);
 | `BeginFrame()` | 每帧开始：清除颜色 + 深度缓冲 |
 | `Dispose()` | 标记释放（当前版本无实际 GL 资源释放，Renderer 各自负责） |
 
+> **窗口 resize 后必须调用 `Resize`**，否则 viewport 保持旧尺寸，画面被拉伸 / 压缩。
+
 ### Shader 编译
 
 ```csharp
@@ -53,7 +56,8 @@ uint program = device.BuildProgram(vertexResourceName, fragmentResourceName);
 uint program = device.BuildProgramFromSource(vertexSource, fragmentSource);
 ```
 
-内部自动做 `CompileShader → AttachShader → LinkProgram`，失败抛 `InvalidOperationException` 并带完整 info log + 源码片段。
+内部自动做 `CompileShader → AttachShader → LinkProgram`，失败抛 `InvalidOperationException`
+并带完整 info log + 源码片段。
 
 ### Buffer / VAO 辅助
 
@@ -101,4 +105,5 @@ grid.Dispose();
 device.Dispose();
 ```
 
-顺序：**先释放 Renderer，再释放 Device**。Device 只是 GL 指针的包装，Renderer 各自持有 program / vao / buffer 句柄。
+顺序：**先释放 Renderer，再释放 Device**。Device 只是 GL 指针的包装，
+Renderer 各自持有 program / vao / buffer 句柄。
