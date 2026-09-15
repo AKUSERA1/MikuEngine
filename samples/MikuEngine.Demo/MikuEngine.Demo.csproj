@@ -3,9 +3,22 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
-    <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>MikuEngine.Demo</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 引擎（模型 / 动画 / 渲染 / 物理）；本项目只负责界面与交互组装。 -->
+    <ProjectReference Include="..\..\src\MikuEngine.Engine\MikuEngine.Engine.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 只取 GL 绑定：窗口与输入由 WinForms 提供。 -->
+    <PackageReference Include="Silk.NET.OpenGL" />
+  </ItemGroup>
 
 </Project>

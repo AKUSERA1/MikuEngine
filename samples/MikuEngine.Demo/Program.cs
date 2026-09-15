@@ -1,17 +1,16 @@
-namespace MikuEngine.Demo
+namespace MikuEngine.Demo;
+
+internal static class Program
 {
-    internal static class Program
+    /// <summary>
+    /// 应用入口：只负责起 WinForms 消息循环。窗口内容见 <see cref="MainForm"/>。
+    /// 高 DPI 模式由 csproj 的 &lt;ApplicationHighDpiMode&gt; 提供，经
+    /// <see cref="ApplicationConfiguration.Initialize"/> 生效。
+    /// </summary>
+    [STAThread]
+    private static void Main()
     {
-        /// <summary>
-        ///  The main entry point for the application.
-        /// </summary>
-        [STAThread]
-        static void Main()
-        {
-            // To customize application configuration such as set high DPI settings or default font,
-            // see https://aka.ms/applicationconfiguration.
-            ApplicationConfiguration.Initialize();
-            Application.Run(new Form1());
-        }
+        ApplicationConfiguration.Initialize();
+        Application.Run(new MainForm());
     }
 }
