@@ -211,10 +211,40 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
     /// 若未来改为逐帧姿态包围盒，须每帧调用并保持 1. 的量化稳定。
     /// </summary>
     public void UpdateLight(MikuEngine.Core.Models.SkeletalModel model, Vector3 lightDirection)
+        => UpdateLight(model.BoundsCenter, model.BoundsSize, lightDirection);
+
+    /// <summary>
+    /// 多模型版：按**全部**模型的绑定姿势包围盒**并集**拟合。
+    ///
+    /// 多 caster 共用一张深度图与同一个视锥时必须用这个重载：只按其中一个模型拟合的话，
+    /// 另外那些模型的影子会落在视锥之外 —— 正交投影下表现为影子被贴图边界整齐切掉。
+    /// 包围盒是绑定姿势的（静态），因此只需在「模型集合发生变化」时调用，不必逐帧。
+    /// </summary>
+    public void UpdateLight(IReadOnlyList<MikuEngine.Core.Models.SkeletalModel> models, Vector3 lightDirection)
     {
-        var center = model.BoundsCenter;
-        var h = model.BoundsSize * 0.5f;                          // AABB 半尺寸
-        float sphereR = MathF.Max(model.BoundsSize.Length() * 0.6f, 15f);
+        if (models.Count == 0) return;
+        if (models.Count == 1)
+        {
+            UpdateLight(models[0], lightDirection);
+            return;
+        }
+
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        foreach (var model in models)
+        {
+            var h = model.BoundsSize * 0.5f;
+            min = Vector3.Min(min, model.BoundsCenter - h);
+            max = Vector3.Max(max, model.BoundsCenter + h);
+        }
+
+        UpdateLight((min + max) * 0.5f, max - min, lightDirection);
+    }
+
+    private void UpdateLight(Vector3 center, Vector3 size, Vector3 lightDirection)
+    {
+        var h = size * 0.5f;                                      // AABB 半尺寸
+        float sphereR = MathF.Max(size.Length() * 0.6f, 15f);
 
         Vector3 dir = Vector3.Normalize(lightDirection);          // 光传播方向
         Vector3 up = MathF.Abs(Vector3.Dot(dir, Vector3.UnitY)) > 0.95f
@@ -278,34 +308,37 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
     }
 
     /// <summary>
-    /// 渲染光照深度图（Z 图）。必须在 model.PrepareFrame 之后、model.Draw 之前调用
-    /// （它复用的 UBO/SSBO 与主渲染一致；帧首统一上传由 PrepareFrame 完成，见前述）。
+    /// 渲染光照深度图（Z 图）—— 单 caster 版。必须在 <c>model.PrepareFrame</c> 之后、<c>model.Draw</c>
+    /// 之前调用（它复用的 UBO/SSBO 与主渲染一致；帧首统一上传由 PrepareFrame 完成，见前述）。
     /// </summary>
     public void RenderShadowMaps(GlesDevice device, GlesModelRenderer model, int viewW, int viewH)
+        => RenderShadowMaps(device, new[] { model }, viewW, viewH);
+
+    /// <summary>
+    /// 渲染光照深度图（Z 图）—— 多 caster 版，**全部 caster 画进同一张图**。
+    ///
+    /// 关键：深度图**只清一次**，然后逐个模型画进去。因此**不能**循环调用单 caster 重载 ——
+    /// 那个重载每次都从 clear 开始，循环调用只会留下最后一个 caster 的影子。
+    ///
+    /// 与单 caster 版一致：不可见的模型（表示枠「非表示」）跳过不投影；因为 clear 无条件发生，
+    /// 「所有 caster 都不可见」也不会留下上一帧的旧影子。
+    /// </summary>
+    public void RenderShadowMaps(GlesDevice device, IReadOnlyList<GlesModelRenderer> casters, int viewW, int viewH)
     {
-        if (Mode == ShadowMode.Off) return;
-        var gl = device.Gl;
+        if (Mode == ShadowMode.Off || casters.Count == 0) return;
 
-        // 表示枠「非表示」：跳过 caster（模型不可见就不该投影）。
-        // 注意 Z 图是自阴影接收侧与床影<b>共享</b>的资源，只早退会留下上一帧的深度 ——
-        // 屏幕上仍会出现一个已经不可见的模型的影子。因此这里清空深度再退
-        // （reze-engine 是整 pass 跳过；本引擎有床影共用同一张图，故多一步 clear）。
-        if (!model.ModelVisible)
+        BeginZPass(device);
+        foreach (var caster in casters)
         {
-            gl.BindFramebuffer(FramebufferTarget.Framebuffer, _zFbo);
-            gl.Viewport(0, 0, (uint)_size, (uint)_size);
-            gl.DepthMask(true);                 // glClear 受深度写掩码影响，显式置位
-            gl.ClearDepth(1f);                  // 空处 z=1（采样即「不在影里」）
-            gl.Clear(ClearBufferMask.DepthBufferBit);
-            gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
-            gl.Viewport(0, 0, (uint)viewW, (uint)viewH);
-            return;
+            if (caster.ModelVisible) DrawCasterIntoZMap(device, caster);
         }
+        EndZPass(device, viewW, viewH);
+    }
 
-        var m = model.Model;
-        int baseOffset = model.SkinMatrixBaseOffset;
-        AttachModelBuffers(model.FrameUbo, model.SkinSsbo);
-        gl.BindVertexArray(model.Vao);            // 顶点/索引来自模型的 VAO
+    /// <summary>绑定 Z 通道 FBO 并清深度：无论有几个 caster / 是否可见，第 1 步都只做一次。</summary>
+    private void BeginZPass(GlesDevice device)
+    {
+        var gl = device.Gl;
 
         // ── 1. 光照深度图（depth-only：无颜色附件，只需清深度）──────────
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, _zFbo);
@@ -319,20 +352,34 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         gl.Disable(EnableCap.CullFace);                // 影图不剔除，避免单面材质投不出影
 
         gl.UseProgram(_zProg);
-        BindCommon(_zProg);
-        gl.Uniform1(U(_zProg, "uSkinMatBase"), (float)baseOffset);
-        // 渲染层根矩阵（拡大率 / 无 全ての親 时的 TR 兜底）：与主渲染同一份，影子跟随视觉模型
-        GlesMatrixUpload.Mat4(gl, U(_zProg, "uModelRoot"), model.ModelRootMatrix);
-        // 顶点 morph：Z pass 与主渲染共用同一份偏移，否则表情变形后影子会对不上。
-        gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, 2, model.MorphSsbo);
-        gl.Uniform1(U(_zProg, "uMorphEnabled"), model.MorphEnabled ? 1f : 0f);
-        int texUnit = 0; gl.Uniform1(U(_zProg, "uDiffuseTex"), texUnit);
+        gl.Uniform1(U(_zProg, "uDiffuseTex"), 0);
 
         // 光栅化斜率偏置：factor=斜率 1.5 / units=常数 2。
         // 正值把 caster 深度推离光源 ⇒ 受光判定更容易 ⇒ 消斜面 acne；与法线偏移（接收侧）、
         // 比较侧余量（「常数底 + 按面朝向的斜率缩放」，见 model.frag.glsl）分工。
         gl.Enable(EnableCap.PolygonOffsetFill);
         gl.PolygonOffset(1.5f, 2f);
+    }
+
+    private void DrawCasterIntoZMap(GlesDevice device, GlesModelRenderer model)
+    {
+        var gl = device.Gl;
+        var m = model.Model;
+
+        // ⚠️ 绑定必须逐 caster 进行：AttachModelBuffers 只**记录**句柄，真正的 BindBufferBase 在
+        // BindCommon 里 —— 它必须在这里（循环内）逐 caster 刷新。留在 BeginZPass 会让整个
+        // Z pass 用「上一帧最后一个 caster」的 FrameUbo/SkinSsbo ⇒ Z 图里只剩最后导入模型
+        // 的剪影，先导入的模型全部失去投影（它们的顶点被别人的蒙皮矩阵画飞了）。
+        AttachModelBuffers(model.FrameUbo, model.SkinSsbo);
+        BindCommon(_zProg); // BindBufferBase(0=FrameUbo, 1=SkinSsbo) 逐 caster 刷新
+        gl.BindVertexArray(model.Vao);            // 顶点/索引来自模型的 VAO
+
+        gl.Uniform1(U(_zProg, "uSkinMatBase"), (float)model.SkinMatrixBaseOffset);
+        // 渲染层根矩阵（拡大率 / 无 全ての親 时的 TR 兜底）：与主渲染同一份，影子跟随视觉模型
+        GlesMatrixUpload.Mat4(gl, U(_zProg, "uModelRoot"), model.ModelRootMatrix);
+        // 顶点 morph：Z pass 与主渲染共用同一份偏移，否则表情变形后影子会对不上。
+        gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, 2, model.MorphSsbo);
+        gl.Uniform1(U(_zProg, "uMorphEnabled"), model.MorphEnabled ? 1f : 0f);
 
         foreach (var seg in m.Segments)
         {
@@ -344,10 +391,12 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
             gl.DrawElements(PrimitiveType.Triangles, (uint)seg.IndexCount, DrawElementsType.UnsignedInt,
                 (void*)(seg.IndexStart * sizeof(uint)));
         }
+    }
 
+    private void EndZPass(GlesDevice device, int viewW, int viewH)
+    {
+        var gl = device.Gl;
         gl.Disable(EnableCap.PolygonOffsetFill);
-
-        // ── 还原 ───────────────────────────────────────────────────────
         gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
         gl.Viewport(0, 0, (uint)viewW, (uint)viewH);
         gl.ActiveTexture(TextureUnit.Texture0);
@@ -400,7 +449,7 @@ public sealed unsafe class GlesShadowRenderer : IDisposable
         }
         float zmean = covered > 0 ? (float)(zsum / covered) : 1f;
 
-        Console.WriteLine($"[Shadow] ① Z 图     : 覆盖 {covered * 100.0 / n:F1}%  z∈[{zmin:F3}, {zmax:F3}]  覆盖区均值 {zmean:F3}" +
+        Console.WriteLine($"[Shadow-OLD] ① Z 图   : 覆盖 {covered * 100.0 / n:F1}%  z∈[{zmin:F3}, {zmax:F3}]  覆盖区均值 {zmean:F3}" +
                           "   （1.000 = Clear 空值；覆盖 0% 即该 pass 无产出）");
     }
 

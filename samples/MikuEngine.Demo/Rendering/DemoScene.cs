@@ -293,7 +293,11 @@ public sealed class DemoScene : IDisposable
     private void SetCameraTrack(MmdCameraTrack track, string file)
     {
         CameraTrack = track;
-        Report($"相机动画：{file} | {track.Frames.Length} 键 | 帧 {track.Frames[0]}..{track.Frames[^1]}");
+        // 载入即生效
+        // 否则相机轨载入后画面纹丝不动，
+        // 看起来就像「载入失败」。
+        CameraAnimationEnabled = true;
+        Report($"相机动画：{file} | {track.Frames.Length} 键 | 帧 {track.Frames[0]}..{track.Frames[^1]}（已启用）");
         RaiseStateChanged();
     }
 
@@ -306,7 +310,10 @@ public sealed class DemoScene : IDisposable
 
     // ================================================================== 主时钟
 
-    /// <summary>所有模型动画区间的并集起点（无动画时为 0）。</summary>
+    /// <summary>
+    /// 场景时钟起点：各模型动画区间的并集起点（无动画时为 0）。
+    /// 不纳入相机轨 —— babylon-mmd 的时钟从 0 起走、各轨自己钳制，相机首键之后才生效。
+    /// </summary>
     public double TimelineStart
     {
         get
@@ -318,7 +325,14 @@ public sealed class DemoScene : IDisposable
         }
     }
 
-    /// <summary>所有模型动画区间的并集终点（无动画时为 0）。</summary>
+    /// <summary>
+    /// 场景时钟终点：**模型动画与相机轨的并集终点**。
+    ///
+    /// 相机轨必须计入：babylon-mmd 的 <c>_computeAnimationDuration</c> 对模型 endFrame 与
+    /// 相机动画时长取 <c>Math.max</c>，reze-engine 也明确「相机轨的长度是它自己的，不必匹配任何模型」。
+    /// 漏掉它的症状：只载相机 VMD 时终点为 0 ⇒ <see cref="Advance"/> 直接早退 ⇒ **相机一动不动**；
+    /// 相机轨比舞蹈长时尾巴也永远播不到。
+    /// </summary>
     public double TimelineEnd
     {
         get
@@ -326,6 +340,7 @@ public sealed class DemoScene : IDisposable
             double end = double.MinValue;
             foreach (var m in _models)
                 if (m.Timeline is not null) end = Math.Max(end, m.Motion.EndFrame);
+            if (CameraTrack is { IsEmpty: false } camera) end = Math.Max(end, camera.EndFrame);
             return end == double.MinValue ? 0 : end;
         }
     }
