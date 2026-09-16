@@ -40,10 +40,14 @@ public sealed class DemoScene : IDisposable
     /// </summary>
     private const float OrbitRotationSensitivity = -0.0025f;
 
-    /// <summary>帧级光照默认方向（与 <see cref="FrameUniforms.Default"/> 同源，只取 xyz）。</summary>
-    private static readonly Vector3 DefaultLightDirection = ToVector3(FrameUniforms.Default().LightDirection);
+    /// <summary>
+    /// 默认光源（MMD 本体初始光源 = PE InitializeDevice：RGB 0.5 灰、方向 (-0.5, -1, +0.5)）。
+    /// 存**原始滑块值**（不归一化）；消费侧（frame 写入 / 阴影视锥拟合）各自 normalize。
+    /// </summary>
+    public static readonly Vector3 DefaultLightDirection = new(-0.5f, -1f, 0.5f);
 
-    private static Vector3 ToVector3(Vector4 v) => new(v.X, v.Y, v.Z);
+    /// <summary>默认光色（0.5 灰）。</summary>
+    public static readonly Vector3 DefaultLightColor = new(0.5f, 0.5f, 0.5f);
 
     private readonly List<DemoModel> _models = [];
     private readonly MmdExternalParentController _externalParents = new();
@@ -97,6 +101,45 @@ public sealed class DemoScene : IDisposable
     public bool GroundCollisionEnabled { get; private set; } = true;
 
     public bool PostPhysicsAppendEnabled { get; private set; } = true;
+
+    // ---------------------------------------------------------------- 光源（场景级全局量）
+
+    /// <summary>光线传播方向（原始滑块值，可非归一化；写入 frame / 阴影拟合时 normalize）。</summary>
+    public Vector3 LightDirection { get; private set; } = DefaultLightDirection;
+
+    /// <summary>光色（0..1；&gt;1 过曝合法）。</summary>
+    public Vector3 LightColor { get; private set; } = DefaultLightColor;
+
+    /// <summary>
+    /// 设置光线方向（MMD 本体光源面板 XYZ）。**必须同步重拟合阴影视锥** —— UpdateLight 按方向算
+    /// LightViewProj，漏掉的话影子会被旧视锥的贴图边界整齐切掉。全零方向守卫（normalize 出 NaN）。
+    /// **不触发 StateChanged**：滑块拖动每次刻度都会进来，全量读数刷新既浪费、其回写还会把
+    /// 正在拖动的滑块弹回旧值（UI 侧的同步只走 0.1s 定时器那一条路）。
+    /// </summary>
+    public void SetLightDirection(Vector3 direction)
+    {
+        if (direction.LengthSquared() < 1e-6f) return;
+        LightDirection = direction;
+        if (_ready) _shadow!.UpdateLight(_skeletons, direction);
+    }
+
+    /// <summary>
+    /// 设置光色（MMD 本体光源面板 RGB，0..1）。只影响接收侧着色与床影，Z 图不用重画。
+    /// 不触发 StateChanged，理由同 <see cref="SetLightDirection"/>。
+    /// </summary>
+    public void SetLightColor(Vector3 color)
+    {
+        LightColor = color;
+    }
+
+    /// <summary>回默认光源（MMD 本体初始值：0.5 灰 / 方向 (-0.5, -1, +0.5)）。</summary>
+    public void ResetLight()
+    {
+        LightDirection = DefaultLightDirection;
+        LightColor = DefaultLightColor;
+        if (_ready) _shadow!.UpdateLight(_skeletons, LightDirection);
+        RaiseStateChanged();
+    }
 
     // ---------------------------------------------------------------- 相机动画（整场景量）
 
@@ -221,7 +264,7 @@ public sealed class DemoScene : IDisposable
             _skeletons.Add(model.Skeleton);
         }
 
-        _shadow!.UpdateLight(_skeletons, DefaultLightDirection);
+        _shadow!.UpdateLight(_skeletons, LightDirection);
         foreach (var model in _models) WireShadow(model);
     }
 
@@ -542,6 +585,10 @@ public sealed class DemoScene : IDisposable
         frame.View = FromColumnMajor(view);
         frame.CameraPosition = new Vector4(Camera.GetEyePosition(), 0f);
         frame.LightViewProj = _shadow!.LightViewProj;
+        // 光源（MMD 本体光源面板）：覆盖 Default() 的默认值。shader 内对方向自带 normalize
+        // （model.vert 的 ln 与 toon V），UpdateLight 内部也 Normalize —— 这里给原始滑块值即可。
+        frame.LightDirection = new Vector4(Vector3.Normalize(LightDirection), 0f);
+        frame.LightColor = new Vector4(LightColor, 1f);
 
         // 1) 动画采样：主时钟游标 → 各模型自己的时间轴 → 混合求值 → morph 传播
         foreach (var model in _models)

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using MikuEngine.Demo.Controls;
 using MikuEngine.Demo.Rendering;
@@ -34,6 +35,7 @@ public partial class MainForm : Form
     private bool _fatalReported;
     private bool _suppressComboEvents;
     private bool _suppressCheckEvents;
+    private bool _suppressLightEvents;
     private string _glVersion = "-";
 
     public MainForm()
@@ -314,6 +316,54 @@ public partial class MainForm : Form
 
     private void OnToggleAppend(object? sender, EventArgs e) => _scene.SetPostPhysicsAppendEnabled(!_scene.PostPhysicsAppendEnabled);
 
+    // ================================================================== 光源（MMD 本体光源面板同款）
+
+    /// <summary>
+    /// 滑块 → 场景。**先把六个滑块值快照下来再进场景**：如果「设一半就触发读数刷新」，
+    /// SyncLightControls 会拿场景里的旧值把正在拖动的滑块弹回去 —— 表现为方向滑块拖不动。
+    /// Set* 内部只改状态 + 重拟合视锥，不做任何 GL 调用，下一帧自动生效。
+    /// </summary>
+    private void OnLightSliderChanged(object? sender, EventArgs e)
+    {
+        if (_suppressLightEvents) return;
+        var color = new Vector3(_trackR.Value / 255f, _trackG.Value / 255f, _trackB.Value / 255f);
+        var dir = new Vector3(_trackX.Value / 100f, _trackY.Value / 100f, _trackZ.Value / 100f);
+        _scene.SetLightColor(color);
+        _scene.SetLightDirection(dir);
+        RefreshLightLabels();
+    }
+
+    private void OnResetLight(object? sender, EventArgs e)
+    {
+        _scene.ResetLight();
+        SyncLightControls();
+        AppendLog($"光源已重置：RGB 128 / 方向 (-0.50, -1.00, +0.50)");
+    }
+
+    /// <summary>场景状态 → 滑块（RefreshReadouts / 重置时回写；抑制标志挡住 ValueChanged 回环）。</summary>
+    private void SyncLightControls()
+    {
+        _suppressLightEvents = true;
+        _trackR.Value = Math.Clamp((int)MathF.Round(_scene.LightColor.X * 255f), 0, 255);
+        _trackG.Value = Math.Clamp((int)MathF.Round(_scene.LightColor.Y * 255f), 0, 255);
+        _trackB.Value = Math.Clamp((int)MathF.Round(_scene.LightColor.Z * 255f), 0, 255);
+        _trackX.Value = Math.Clamp((int)MathF.Round(_scene.LightDirection.X * 100f), -100, 100);
+        _trackY.Value = Math.Clamp((int)MathF.Round(_scene.LightDirection.Y * 100f), -100, 100);
+        _trackZ.Value = Math.Clamp((int)MathF.Round(_scene.LightDirection.Z * 100f), -100, 100);
+        _suppressLightEvents = false;
+        RefreshLightLabels();
+    }
+
+    private void RefreshLightLabels()
+    {
+        _lblRVal.Text = _trackR.Value.ToString();
+        _lblGVal.Text = _trackG.Value.ToString();
+        _lblBVal.Text = _trackB.Value.ToString();
+        _lblXVal.Text = (_trackX.Value / 100f).ToString("F2");
+        _lblYVal.Text = (_trackY.Value / 100f).ToString("F2");
+        _lblZVal.Text = (_trackZ.Value / 100f).ToString("F2");
+    }
+
     private void OnToggleCameraAnimation(object? sender, EventArgs e)
         => _scene.SetCameraAnimationEnabled(!_scene.CameraAnimationEnabled);
 
@@ -342,6 +392,7 @@ public partial class MainForm : Form
 
             显示
               E = 轮廓线 | 0 / 1 / 2 = 自阴影 关 / 自阴影 / 自阴影+床影 | S = 自阴影风格循环
+              底部「光源」面板 = RGB + 方向 XYZ 滑块（MMD 本体同款，重置回 0.5 灰 / (-0.5,-1,+0.5)）
               P = 物理模拟 | G = 地面碰撞 | H = 物理后付与 | R = 重置模型变换
             """,
             "操作说明", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -514,6 +565,8 @@ public partial class MainForm : Form
         _styleThreshold.Checked = _scene.ShadowStyle == SelfShadowStyle.Threshold;
         _styleSoft.Checked = _scene.ShadowStyle == SelfShadowStyle.Soft;
 
+        SyncLightControls();
+
         _statusRight.Text = $"{_fps:F0} fps | 模型 {_scene.Models.Count} | OpenGL {_glVersion}";
     }
 
@@ -525,4 +578,5 @@ public partial class MainForm : Form
         _logBox.AppendText($"{DateTime.Now:HH:mm:ss} {message}{Environment.NewLine}");
         _statusHint.Text = message;
     }
+
 }
